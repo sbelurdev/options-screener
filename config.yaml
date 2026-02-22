@@ -1,0 +1,36 @@
+﻿tickers:
+  - SPY
+  - QQQ
+  - MSFT
+  - AAPL
+
+max_candidates_per_ticker_per_bucket: 5
+delta_put_min: -0.35
+delta_put_max: -0.15
+delta_call_min: 0.15
+delta_call_max: 0.35
+
+dte_current_week_max_days: 7
+dte_next_week_min_days: 8
+dte_next_week_max_days: 14
+monthly_target_dte_min: 30
+monthly_target_dte_max: 45
+
+min_open_interest: 200
+min_volume: 50
+max_spread_pct: 0.10
+min_annualized_yield: 0.12
+risk_free_rate: 0.045
+
+put_otm_pct_min: 0.05
+put_otm_pct_max: 0.15
+call_otm_pct_min: 0.05
+call_otm_pct_max: 0.15
+
+earnings_risk_penalty: 0.20
+
+output_dir: ./reports
+log_dir: ./logs
+cache_dir: ./cache
+price_history_period: 6mo
+price_history_interval: 1d

@@ -1,0 +1,1 @@
+run_date,ticker,bucket,bucket_label,expiration,strategy,contract_symbol,spot,strike,bid,ask,mid,spread_pct,volume,open_interest,implied_volatility,delta,delta_source,dte,annualized_yield,breakeven,otm_pct,earnings_date,earnings_before_expiry,ma20,ma50,rsi14,hv20,score,why_ranked_high

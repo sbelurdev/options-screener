@@ -1,0 +1,6 @@
+﻿pandas>=2.2.0
+numpy>=1.26.0
+yfinance>=0.2.50
+PyYAML>=6.0.0
+scipy>=1.11.0
+lxml>=5.2.0
