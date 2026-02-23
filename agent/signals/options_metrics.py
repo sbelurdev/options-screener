@@ -2,7 +2,7 @@
 
 import math
 from datetime import date
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 import numpy as np
 import pandas as pd
@@ -58,10 +58,12 @@ def black_scholes_delta(
 def annualized_yield(strategy: str, credit: float, strike: float, spot: float, dte: int) -> Optional[float]:
     if dte <= 0:
         return None
+    # Premium quote is per-share; convert to per-contract to match collateral basis.
+    premium_per_contract = credit * 100.0
     denom = strike * 100.0 if strategy == "PUT" else spot * 100.0
     if denom <= 0:
         return None
-    return (credit / denom) * (365.0 / dte)
+    return (premium_per_contract / denom) * (365.0 / dte)
 
 
 def breakeven(strategy: str, strike: float, spot: float, credit: float) -> float:
@@ -157,6 +159,7 @@ def build_option_records(
     earnings_date: Optional[date],
     config: Dict[str, Any],
     logger,
+    decision_logger: Optional[Callable[[dict], None]] = None,
 ) -> List[Dict[str, Any]]:
     today = date.today()
     dte = get_dte(expiration, today)
@@ -168,6 +171,11 @@ def build_option_records(
         return []
 
     rows: List[Dict[str, Any]] = []
+    min_oi = safe_float(config.get("min_open_interest"))
+    min_vol = safe_float(config.get("min_volume"))
+    max_sp = safe_float(config.get("max_spread_pct"))
+    risk_free = safe_float(config.get("risk_free_rate"))
+
     req_cols = [
         "strike",
         "bid",
@@ -192,24 +200,57 @@ def build_option_records(
         iv = safe_float(r.get("impliedVolatility"))
         contract_symbol = str(r.get("contractSymbol") or "")
 
+        def _log_decision(filtered: bool, reason: str) -> None:
+            if decision_logger is None:
+                return
+            decision_logger(
+                {
+                    "event": "screening_decision",
+                    "expiration": expiration.isoformat(),
+                    "option_type": strategy,
+                    "contractSymbol": contract_symbol,
+                    "strike": strike,
+                    "bid": bid,
+                    "ask": ask,
+                    "lastPrice": safe_float(r.get("lastPrice")),
+                    "volume": volume,
+                    "openInterest": oi,
+                    "impliedVolatility": iv,
+                    "status": "filtered" if filtered else "kept",
+                    "filtered": "yes" if filtered else "no",
+                    "filter_reason": reason if filtered else "",
+                }
+            )
+
         if strike is None or strike <= 0:
+            _log_decision(True, "invalid_strike")
             continue
         if bid <= 0 or ask <= 0:
+            _log_decision(True, "invalid_bid_ask")
             continue
 
         sp = spread_pct(bid, ask)
         if sp is None:
+            _log_decision(True, "invalid_spread")
             continue
-        if oi < int(config["min_open_interest"]):
+        if min_oi is not None and oi < int(min_oi):
+            _log_decision(True, f"open_interest_below_min:{oi}<{int(min_oi)}")
             continue
-        if volume < int(config["min_volume"]):
+        if min_vol is not None and volume < int(min_vol):
+            _log_decision(True, f"volume_below_min:{volume}<{int(min_vol)}")
             continue
-        if sp > float(config["max_spread_pct"]):
+        if max_sp is not None and sp > float(max_sp):
+            _log_decision(True, f"spread_above_max:{sp:.6f}>{float(max_sp):.6f}")
             continue
 
         mid = (bid + ask) / 2.0
         ann_yield = annualized_yield(strategy, mid, strike, spot, dte)
         if ann_yield is None or ann_yield < float(config["min_annualized_yield"]):
+            _log_decision(
+                True,
+                f"annualized_yield_below_min:{0.0 if ann_yield is None else ann_yield:.6f}<"
+                f"{float(config['min_annualized_yield']):.6f}",
+            )
             continue
 
         if strategy == "PUT":
@@ -218,19 +259,22 @@ def build_option_records(
             otm_pct = (strike - spot) / spot if spot > 0 else None
 
         if otm_pct is not None and otm_pct < 0:
+            _log_decision(True, f"not_otm:{otm_pct:.6f}")
             continue
 
         delta_raw = safe_float(r.get("delta"))
         delta_source = "provided"
         if delta_raw is None:
-            bs_delta = black_scholes_delta(
-                strategy=strategy,
-                spot=spot,
-                strike=strike,
-                dte=dte,
-                iv=iv if iv is not None else -1,
-                risk_free_rate=float(config["risk_free_rate"]),
-            )
+            bs_delta = None
+            if risk_free is not None and iv is not None:
+                bs_delta = black_scholes_delta(
+                    strategy=strategy,
+                    spot=spot,
+                    strike=strike,
+                    dte=dte,
+                    iv=iv,
+                    risk_free_rate=float(risk_free),
+                )
             if bs_delta is not None:
                 delta_raw = bs_delta
                 delta_source = "black_scholes"
@@ -238,6 +282,12 @@ def build_option_records(
                 delta_source = "otm_fallback"
 
         if not _passes_delta_or_otm(strategy, delta_raw, otm_pct, config):
+            _log_decision(
+                True,
+                "delta_or_otm_out_of_range"
+                if delta_raw is not None
+                else "otm_fallback_out_of_range",
+            )
             continue
 
         earnings_before_expiry = earnings_date is not None and earnings_date <= expiration and earnings_date >= today
@@ -273,5 +323,6 @@ def build_option_records(
             "hv20": technicals["hv20"],
         }
         rows.append(record)
+        _log_decision(False, "")
 
     return rows

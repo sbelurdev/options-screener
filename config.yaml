@@ -1,8 +1,8 @@
 ﻿tickers:
-  - SPY
-  - QQQ
+  - TQQQ
   - MSFT
   - AAPL
+  - NVDA 
 
 max_candidates_per_ticker_per_bucket: 5
 delta_put_min: -0.35
@@ -16,11 +16,11 @@ dte_next_week_max_days: 14
 monthly_target_dte_min: 30
 monthly_target_dte_max: 45
 
-min_open_interest: 200
-min_volume: 50
-max_spread_pct: 0.10
+min_open_interest: null
+min_volume: null
+max_spread_pct: null
 min_annualized_yield: 0.12
-risk_free_rate: 0.045
+risk_free_rate: null
 
 put_otm_pct_min: 0.05
 put_otm_pct_max: 0.15

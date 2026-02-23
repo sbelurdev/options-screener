@@ -24,11 +24,11 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "dte_next_week_max_days": 14,
     "monthly_target_dte_min": 30,
     "monthly_target_dte_max": 45,
-    "min_open_interest": 200,
-    "min_volume": 50,
-    "max_spread_pct": 0.10,
+    "min_open_interest": None,
+    "min_volume": None,
+    "max_spread_pct": None,
     "min_annualized_yield": 0.12,
-    "risk_free_rate": 0.045,
+    "risk_free_rate": None,
     "put_otm_pct_min": 0.05,
     "put_otm_pct_max": 0.15,
     "call_otm_pct_min": 0.05,
@@ -90,6 +90,7 @@ def _process_ticker(ticker: str, provider: YFinanceProvider, config: Dict[str, A
             earnings_date=earnings_date,
             config=config,
             logger=logger,
+            decision_logger=lambda row: provider.log_option_screen_result(ticker, row),
         )
         call_candidates = build_option_records(
             ticker=ticker,
@@ -103,6 +104,7 @@ def _process_ticker(ticker: str, provider: YFinanceProvider, config: Dict[str, A
             earnings_date=earnings_date,
             config=config,
             logger=logger,
+            decision_logger=lambda row: provider.log_option_screen_result(ticker, row),
         )
 
         all_bucket = put_candidates + call_candidates
@@ -135,7 +137,7 @@ def run_pipeline(config: Dict[str, Any], logger) -> None:
     Path(config["log_dir"]).mkdir(parents=True, exist_ok=True)
     Path(config["cache_dir"]).mkdir(parents=True, exist_ok=True)
 
-    provider = YFinanceProvider(logger=logger)
+    provider = YFinanceProvider(logger=logger, log_dir=config["log_dir"])
     tickers: List[str] = [str(t).upper() for t in config["tickers"]]
 
     all_candidates: List[Dict[str, Any]] = []

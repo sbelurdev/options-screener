@@ -49,7 +49,11 @@ def score_candidate(row: Dict[str, Any], technicals: Dict[str, float], config: D
     spread = float(row.get("spread_pct") or 1.0)
     oi = float(row.get("open_interest") or 0.0)
     vol = float(row.get("volume") or 0.0)
-    spread_component = _clamp_0_1(1.0 - spread / max(float(config["max_spread_pct"]), 1e-6))
+    max_spread_cfg = config.get("max_spread_pct")
+    if max_spread_cfg is None:
+        spread_component = 0.5
+    else:
+        spread_component = _clamp_0_1(1.0 - spread / max(float(max_spread_cfg), 1e-6))
     oi_component = _clamp_0_1(oi / 2000.0)
     vol_component = _clamp_0_1(vol / 500.0)
     liquidity_score = 0.5 * spread_component + 0.25 * oi_component + 0.25 * vol_component
