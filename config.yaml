@@ -1,8 +1,14 @@
-﻿tickers:
-  - TQQQ
+﻿covered_call_tickers:
   - MSFT
   - AAPL
-  - NVDA 
+  - NVDA
+  - TQQQ
+
+cash_secured_put_tickers:
+  - TQQQ
+  - NVDA
+  - AMD
+  - TSML
 
 max_candidates_per_ticker_per_bucket: 5
 delta_put_min: -0.35

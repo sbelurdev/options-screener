@@ -52,7 +52,8 @@ def load_config(args: argparse.Namespace) -> Dict[str, Any]:
     if args.tickers:
         tickers = [t.strip().upper() for t in args.tickers.split(",") if t.strip()]
         if tickers:
-            config["tickers"] = tickers
+            config["covered_call_tickers"] = tickers
+            config["cash_secured_put_tickers"] = tickers
 
     if args.output_dir:
         config["output_dir"] = args.output_dir

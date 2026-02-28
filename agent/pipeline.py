@@ -13,7 +13,8 @@ from agent.signals.options_metrics import build_option_records, select_expiratio
 from agent.signals.technicals import compute_technicals
 
 DEFAULT_CONFIG: Dict[str, Any] = {
-    "tickers": ["SPY", "QQQ", "MSFT", "AAPL"],
+    "covered_call_tickers": ["SPY", "QQQ", "MSFT", "AAPL"],
+    "cash_secured_put_tickers": ["SPY", "QQQ", "MSFT", "AAPL"],
     "max_candidates_per_ticker_per_bucket": 5,
     "delta_put_min": -0.35,
     "delta_put_max": -0.15,
@@ -47,7 +48,7 @@ DISCLAIMER = (
 )
 
 
-def _process_ticker(ticker: str, provider: YFinanceProvider, config: Dict[str, Any], logger) -> Dict[str, Any]:
+def _process_ticker(ticker: str, provider: YFinanceProvider, config: Dict[str, Any], logger, strategies: List[str]) -> Dict[str, Any]:
     ticker_result: Dict[str, Any] = {"ticker": ticker, "buckets": {}, "candidates": []}
 
     hist = provider.get_price_history(
@@ -78,33 +79,41 @@ def _process_ticker(ticker: str, provider: YFinanceProvider, config: Dict[str, A
 
         calls_df, puts_df = provider.get_options_chain(ticker, expiry)
 
-        put_candidates = build_option_records(
-            ticker=ticker,
-            strategy="PUT",
-            options_df=puts_df,
-            expiration=expiry,
-            bucket_name=bucket_name,
-            bucket_label=bucket_meta.get("label", bucket_name),
-            spot=spot,
-            technicals=technicals,
-            earnings_date=earnings_date,
-            config=config,
-            logger=logger,
-            decision_logger=lambda row: provider.log_option_screen_result(ticker, row),
+        put_candidates = (
+            build_option_records(
+                ticker=ticker,
+                strategy="PUT",
+                options_df=puts_df,
+                expiration=expiry,
+                bucket_name=bucket_name,
+                bucket_label=bucket_meta.get("label", bucket_name),
+                spot=spot,
+                technicals=technicals,
+                earnings_date=earnings_date,
+                config=config,
+                logger=logger,
+                decision_logger=lambda row: provider.log_option_screen_result(ticker, row),
+            )
+            if "PUT" in strategies
+            else []
         )
-        call_candidates = build_option_records(
-            ticker=ticker,
-            strategy="CALL",
-            options_df=calls_df,
-            expiration=expiry,
-            bucket_name=bucket_name,
-            bucket_label=bucket_meta.get("label", bucket_name),
-            spot=spot,
-            technicals=technicals,
-            earnings_date=earnings_date,
-            config=config,
-            logger=logger,
-            decision_logger=lambda row: provider.log_option_screen_result(ticker, row),
+        call_candidates = (
+            build_option_records(
+                ticker=ticker,
+                strategy="CALL",
+                options_df=calls_df,
+                expiration=expiry,
+                bucket_name=bucket_name,
+                bucket_label=bucket_meta.get("label", bucket_name),
+                spot=spot,
+                technicals=technicals,
+                earnings_date=earnings_date,
+                config=config,
+                logger=logger,
+                decision_logger=lambda row: provider.log_option_screen_result(ticker, row),
+            )
+            if "CALL" in strategies
+            else []
         )
 
         all_bucket = put_candidates + call_candidates
@@ -138,16 +147,25 @@ def run_pipeline(config: Dict[str, Any], logger) -> None:
     Path(config["cache_dir"]).mkdir(parents=True, exist_ok=True)
 
     provider = YFinanceProvider(logger=logger, log_dir=config["log_dir"])
-    tickers: List[str] = [str(t).upper() for t in config["tickers"]]
+
+    cc_tickers: List[str] = [str(t).upper() for t in config.get("covered_call_tickers", [])]
+    csp_tickers: List[str] = [str(t).upper() for t in config.get("cash_secured_put_tickers", [])]
+
+    ticker_strategies: Dict[str, List[str]] = {}
+    for t in cc_tickers:
+        ticker_strategies.setdefault(t, []).append("CALL")
+    for t in csp_tickers:
+        ticker_strategies.setdefault(t, []).append("PUT")
+    all_tickers = list(ticker_strategies.keys())
 
     all_candidates: List[Dict[str, Any]] = []
     bucket_selection_summary: Dict[str, Dict[str, Any]] = {}
 
-    logger.info("Starting options screener for tickers=%s", ",".join(tickers))
+    logger.info("Starting options screener for tickers=%s", ",".join(all_tickers))
 
-    for ticker in tickers:
+    for ticker, strategies in ticker_strategies.items():
         try:
-            result = _process_ticker(ticker, provider, config, logger)
+            result = _process_ticker(ticker, provider, config, logger, strategies)
             bucket_selection_summary[ticker] = result.get("buckets", {})
             all_candidates.extend(result.get("candidates", []))
         except Exception as exc:
@@ -159,9 +177,9 @@ def run_pipeline(config: Dict[str, Any], logger) -> None:
     print("=" * 72)
     print("Options Screener Summary")
     print("=" * 72)
-    print(f"Tickers processed: {', '.join(tickers)}")
+    print(f"Tickers processed: {', '.join(all_tickers)}")
     print("Selected expirations by ticker:")
-    for t in tickers:
+    for t in all_tickers:
         buckets = bucket_selection_summary.get(t, {})
         parts = []
         for bucket in ["current_week", "next_week", "monthly"]:
@@ -189,6 +207,8 @@ def run_pipeline(config: Dict[str, Any], logger) -> None:
     else:
         print("No candidates passed filters today.")
 
+    print(f"\nCovered call tickers:      {', '.join(cc_tickers) or 'none'}")
+    print(f"Cash-secured put tickers:  {', '.join(csp_tickers) or 'none'}")
     print(f"CSV report:  {csv_path}")
     print(f"HTML report: {html_path}")
     print("\nRisk warning:")
