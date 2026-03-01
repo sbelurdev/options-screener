@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from datetime import date
 from pathlib import Path
@@ -7,6 +7,7 @@ from typing import Any, Dict, List
 import pandas as pd
 
 from agent.providers.yfinance_provider import YFinanceProvider
+from agent.recommendation.csp_recommender import build_csp_recommendations
 from agent.reporting.render import write_reports
 from agent.scoring.score import score_candidate
 from agent.signals.options_metrics import build_option_records, select_expiration_buckets
@@ -40,6 +41,16 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "cache_dir": "./cache",
     "price_history_period": "6mo",
     "price_history_interval": "1d",
+    "csp_recommendation": {
+        "enabled": True,
+        "max_recommendations": 10,
+        "ivr_min": 30.0,
+        "earnings_buffer_days": 7,
+        "delta_min": 0.10,
+        "delta_max": 0.25,
+        "use_support_filter": True,
+        "support_pct_buffer": 0.02,
+    },
 }
 
 DISCLAIMER = (
@@ -49,7 +60,14 @@ DISCLAIMER = (
 
 
 def _process_ticker(ticker: str, provider: YFinanceProvider, config: Dict[str, Any], logger, strategies: List[str]) -> Dict[str, Any]:
-    ticker_result: Dict[str, Any] = {"ticker": ticker, "buckets": {}, "candidates": []}
+    ticker_result: Dict[str, Any] = {
+        "ticker": ticker,
+        "buckets": {},
+        "candidates": [],
+        "technicals": {},
+        "earnings_date": None,
+        "price_df": pd.DataFrame(),
+    }
 
     hist = provider.get_price_history(
         ticker,
@@ -60,7 +78,10 @@ def _process_ticker(ticker: str, provider: YFinanceProvider, config: Dict[str, A
         logger.warning("%s: no price history, skipping", ticker)
         return ticker_result
 
+    ticker_result["price_df"] = hist
+
     technicals = compute_technicals(hist)
+    ticker_result["technicals"] = technicals
     spot = float(technicals["spot"])
 
     expirations = provider.get_options_expirations(ticker)
@@ -68,6 +89,7 @@ def _process_ticker(ticker: str, provider: YFinanceProvider, config: Dict[str, A
     ticker_result["buckets"] = buckets
 
     earnings_date = provider.get_earnings_date(ticker)
+    ticker_result["earnings_date"] = earnings_date
     if earnings_date is None:
         logger.info("%s: earnings date unavailable", ticker)
 
@@ -160,6 +182,7 @@ def run_pipeline(config: Dict[str, Any], logger) -> None:
 
     all_candidates: List[Dict[str, Any]] = []
     bucket_selection_summary: Dict[str, Dict[str, Any]] = {}
+    ticker_results_map: Dict[str, Dict[str, Any]] = {}
 
     logger.info("Starting options screener for tickers=%s", ",".join(all_tickers))
 
@@ -168,11 +191,14 @@ def run_pipeline(config: Dict[str, Any], logger) -> None:
             result = _process_ticker(ticker, provider, config, logger, strategies)
             bucket_selection_summary[ticker] = result.get("buckets", {})
             all_candidates.extend(result.get("candidates", []))
+            ticker_results_map[ticker] = result
         except Exception as exc:
             logger.exception("Failed processing %s: %s", ticker, exc)
             continue
 
-    csv_path, html_path = write_reports(all_candidates, config, DISCLAIMER)
+    csp_recommendations = build_csp_recommendations(ticker_results_map, csp_tickers, config)
+
+    csv_path, html_path = write_reports(all_candidates, config, DISCLAIMER, csp_recommendations)
 
     print("=" * 72)
     print("Options Screener Summary")
@@ -206,6 +232,14 @@ def run_pipeline(config: Dict[str, Any], logger) -> None:
             )
     else:
         print("No candidates passed filters today.")
+
+    if csp_recommendations:
+        print("\nCSP Recommendations:")
+        for rec in csp_recommendations:
+            verdict = rec["recommend"]
+            strike = f"${rec['strike']:.2f}" if rec["strike"] else "—"
+            ivr = f"{rec['ivr']:.0f}%" if rec["ivr"] is not None else "n/a"
+            print(f"  {rec['ticker']:6s}  {verdict:10s}  strike={strike}  IVR={ivr}  {rec['reason']}")
 
     print(f"\nCovered call tickers:      {', '.join(cc_tickers) or 'none'}")
     print(f"Cash-secured put tickers:  {', '.join(csp_tickers) or 'none'}")

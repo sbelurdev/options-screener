@@ -35,6 +35,19 @@ call_otm_pct_max: 0.15
 
 earnings_risk_penalty: 0.20
 
+# ── CSP Recommendation Engine ─────────────────────────────────────────────────
+# Set enabled: false to skip recommendations entirely.
+# All criteria below are optional — set a value to null to disable that check.
+csp_recommendation:
+  enabled: true
+  max_recommendations: 10      # Max rows shown in the recommendation table
+  ivr_min: 30.0                # IV Rank proxy must exceed this % (null = skip check)
+  earnings_buffer_days: 7      # Reject if earnings fall within N days of expiration
+  delta_min: 0                 # |delta| lower bound for recommended strike
+  delta_max: 0.25              # |delta| upper bound for recommended strike
+  use_support_filter: true     # Require strike at/below a support level (set false to skip)
+  support_pct_buffer: 0.02     # Allow strike up to 2% above a support level
+
 output_dir: ./reports
 log_dir: ./logs
 cache_dir: ./cache
