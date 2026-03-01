@@ -6,9 +6,10 @@
 
 cash_secured_put_tickers:
   - TQQQ
+  - TECL
   - NVDA
   - AMD
-  - TSML
+  - TSM
 
 max_candidates_per_ticker_per_bucket: 5
 delta_put_min: -0.35
@@ -19,14 +20,14 @@ delta_call_max: 0.35
 dte_current_week_max_days: 7
 dte_next_week_min_days: 8
 dte_next_week_max_days: 14
-monthly_target_dte_min: 30
+monthly_target_dte_min: 28
 monthly_target_dte_max: 45
 
 min_open_interest: null
 min_volume: null
 max_spread_pct: null
 min_annualized_yield: 0.12
-risk_free_rate: null
+risk_free_rate: 0.05
 
 put_otm_pct_min: 0.05
 put_otm_pct_max: 0.15
@@ -35,8 +36,21 @@ call_otm_pct_max: 0.15
 
 earnings_risk_penalty: 0.20
 
+# ── CSP Recommendation Engine ─────────────────────────────────────────────────
+# Set enabled: false to skip recommendations entirely.
+# All criteria below are optional — set a value to null to disable that check.
+csp_recommendation:
+  enabled: true
+  max_recommendations: 10      # Max rows shown in the recommendation table
+  ivr_min: 30.0                # IV Rank proxy must exceed this % (null = skip check)
+  earnings_buffer_days: 7      # Reject if earnings fall within N days of expiration
+  delta_min: 0.10              # |delta| lower bound for recommended strike
+  delta_max: 0.25              # |delta| upper bound for recommended strike
+  use_support_filter: true     # Require strike at/below a support level (set false to skip)
+  support_pct_buffer: 0.02     # Allow strike up to 2% above a support level
+
 output_dir: ./reports
 log_dir: ./logs
 cache_dir: ./cache
-price_history_period: 6mo
+price_history_period: 1y
 price_history_interval: 1d

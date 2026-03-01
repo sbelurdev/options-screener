@@ -44,7 +44,8 @@ def black_scholes_delta(
 ) -> Optional[float]:
     if spot <= 0 or strike <= 0 or dte <= 0 or iv is None or iv <= 0:
         return None
-    t = dte / 365.0
+    # Convert calendar days to approximate trading days, then annualise on 252-day basis
+    t = (dte * 252 / 365) / 252.0  # == dte / 365.0, keeps calendar & vol bases consistent
     try:
         d1 = (math.log(spot / strike) + (risk_free_rate + 0.5 * iv * iv) * t) / (iv * math.sqrt(t))
     except (ValueError, ZeroDivisionError):
@@ -77,7 +78,7 @@ def get_dte(expiration: date, today: date) -> int:
 
 
 def select_expiration_buckets(expirations: List[date], today: date, config: Dict[str, Any], logger) -> Dict[str, Dict[str, Any]]:
-    future = sorted([d for d in expirations if d >= today])
+    future = sorted([d for d in expirations if 0 < (d - today).days <= 45])  # exclude same-day; hard cap at 45 days
 
     def _pick_in_range(min_d: int, max_d: int) -> Optional[date]:
         candidates = [d for d in future if min_d <= (d - today).days <= max_d]
@@ -105,22 +106,38 @@ def select_expiration_buckets(expirations: List[date], today: date, config: Dict
             next_week = future[0]
         if next_week is not None:
             buckets["next_week"]["label"] = "Next Week (fallback)"
+    # Prevent next_week duplicating current_week
+    if next_week is not None and next_week == current:
+        next_week = None
     buckets["next_week"]["expiration"] = next_week
 
-    monthly_candidates = [d for d in future if is_third_friday(d) and d > today]
+    min_dte = int(config["monthly_target_dte_min"])
+    max_dte = int(config["monthly_target_dte_max"])
+    # Hard cap: never pick an expiration beyond max_dte days from today.
+    # Only consider third-Friday dates within the configured DTE range.
+    monthly_candidates = [
+        d for d in future
+        if is_third_friday(d) and min_dte <= (d - today).days <= max_dte
+    ]
     if monthly_candidates:
         monthly = monthly_candidates[0]
     else:
-        min_dte = int(config["monthly_target_dte_min"])
-        max_dte = int(config["monthly_target_dte_max"])
+        # Fallback: any expiry within the DTE window, closest to 4 weeks (28 days).
         proxy = [d for d in future if min_dte <= (d - today).days <= max_dte]
         if proxy:
-            target_mid = (min_dte + max_dte) / 2.0
-            monthly = min(proxy, key=lambda x: abs((x - today).days - target_mid))
+            monthly = min(proxy, key=lambda x: abs((x - today).days - 28))
+            buckets["monthly"]["label"] = "Monthly (proxy ~4wk)"
         else:
-            monthly = future[-1] if future else None
-        if monthly is not None:
-            buckets["monthly"]["label"] = "Monthly (proxy)"
+            # Nothing within the window — leave monthly empty rather than picking
+            # a LEAPS or far-future expiration.
+            monthly = None
+            logger.warning(
+                "No expiration found within %d–%d DTE for monthly bucket; skipping",
+                min_dte, max_dte,
+            )
+    # Prevent monthly duplicating current_week or next_week
+    if monthly is not None and monthly in (current, next_week):
+        monthly = None
     buckets["monthly"]["expiration"] = monthly
 
     for b_name, b in buckets.items():
@@ -171,6 +188,7 @@ def build_option_records(
         return []
 
     rows: List[Dict[str, Any]] = []
+    missing_delta_count = 0
     min_oi = safe_float(config.get("min_open_interest"))
     min_vol = safe_float(config.get("min_volume"))
     max_sp = safe_float(config.get("max_spread_pct"))
@@ -290,6 +308,11 @@ def build_option_records(
             )
             continue
 
+        # Delta unavailable after all attempts — default to 0 and count for warning
+        if delta_raw is None:
+            delta_raw = 0.0
+            missing_delta_count += 1
+
         earnings_before_expiry = earnings_date is not None and earnings_date <= expiration and earnings_date >= today
 
         record = {
@@ -309,7 +332,7 @@ def build_option_records(
             "volume": volume,
             "open_interest": oi,
             "implied_volatility": round(iv, 6) if iv is not None else None,
-            "delta": round(delta_raw, 6) if delta_raw is not None else None,
+            "delta": round(delta_raw, 6),
             "delta_source": delta_source,
             "dte": dte,
             "annualized_yield": ann_yield,
@@ -324,5 +347,12 @@ def build_option_records(
         }
         rows.append(record)
         _log_decision(False, "")
+
+    if missing_delta_count > 0:
+        logger.warning(
+            "%s %s %s: delta missing for %d/%d candidate(s) — defaulted to 0. "
+            "Set risk_free_rate in config.yaml to enable Black-Scholes delta calculation.",
+            ticker, strategy, expiration.isoformat(), missing_delta_count, len(rows),
+        )
 
     return rows
