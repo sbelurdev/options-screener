@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from datetime import date
 from pathlib import Path
@@ -237,7 +237,7 @@ def run_pipeline(config: Dict[str, Any], logger) -> None:
         print("\nCSP Recommendations:")
         for rec in csp_recommendations:
             verdict = rec["recommend"]
-            strike = f"${rec['strike']:.2f}" if rec["strike"] else "—"
+            strike = f"${rec['strike']:.2f}" if rec["strike"] else "-"
             ivr = f"{rec['ivr']:.0f}%" if rec["ivr"] is not None else "n/a"
             print(f"  {rec['ticker']:6s}  {verdict:10s}  strike={strike}  IVR={ivr}  {rec['reason']}")
 
@@ -249,3 +249,4 @@ def run_pipeline(config: Dict[str, Any], logger) -> None:
     print(DISCLAIMER)
 
     logger.info("Run completed. CSV=%s HTML=%s candidates=%d", csv_path, html_path, len(all_candidates))
+

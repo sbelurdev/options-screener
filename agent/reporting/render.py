@@ -46,21 +46,17 @@ def _empty_df() -> pd.DataFrame:
 
 def _fmt_money(val: Optional[float], prefix: str = "$") -> str:
     if val is None:
-        return "—"
+        return "-"
     return f"{prefix}{val:,.2f}"
 
 
 def _fmt_pct(val: Optional[float]) -> str:
     if val is None:
-        return "—"
+        return "-"
     return f"{val:.1f}%"
 
 
-def _render_csp_recommendations(
-    recommendations: List[Dict[str, Any]],
-    html_parts: List[str],
-) -> None:
-    """Render the CSP recommendation table at the top of the report."""
+def _render_csp_recommendations(recommendations: List[Dict[str, Any]], html_parts: List[str]) -> None:
     if not recommendations:
         return
 
@@ -72,7 +68,7 @@ def _render_csp_recommendations(
     html_parts.append(
         f"<summary>CSP Recommendations"
         f"<span class='count'>"
-        f"{yes_count} Yes &nbsp;·&nbsp; {borderline_count} Borderline &nbsp;·&nbsp; {total} total"
+        f"{yes_count} Yes &nbsp;&middot;&nbsp; {borderline_count} Borderline &nbsp;&middot;&nbsp; {total} total"
         f"</span></summary>"
     )
 
@@ -103,21 +99,19 @@ def _render_csp_recommendations(
     for rec in recommendations:
         ticker = rec["ticker"]
         verdict = rec["recommend"]
-        fidelity_url = (
-            f"https://digital.fidelity.com/ftgw/digital/options-research/?symbol={ticker}"
-        )
+        fidelity_url = f"https://digital.fidelity.com/ftgw/digital/options-research/?symbol={ticker}"
         ivr_display = _fmt_pct(rec.get("ivr"))
-        if rec.get("ivr_source"):
-            ivr_display += " ★" if "proxy" in (rec.get("ivr_source") or "") else ""
+        if rec.get("ivr_source") and "proxy" in (rec.get("ivr_source") or ""):
+            ivr_display += " *"
 
         ann_yield = rec.get("annualized_yield")
-        yield_display = f"{ann_yield:.1%}" if ann_yield is not None else "—"
+        yield_display = f"{ann_yield:.1%}" if ann_yield is not None else "-"
 
-        near_flags = []
+        near_flags: List[str] = []
         if rec.get("near_support"):
-            near_flags.append("✓ support")
+            near_flags.append("support")
         if rec.get("near_round_number"):
-            near_flags.append("○ round#")
+            near_flags.append("round#")
         near_str = " ".join(near_flags)
         reason_full = rec.get("reason", "")
         if near_str:
@@ -125,14 +119,13 @@ def _render_csp_recommendations(
 
         css = verdict_class.get(verdict, "")
         delta_raw = rec.get("delta")
-        delta_display = f"{abs(float(delta_raw)):.3f}" if delta_raw is not None else "—"
+        delta_display = f"{abs(float(delta_raw)):.3f}" if delta_raw is not None else "-"
         spot_val = rec.get("spot")
         strike_val = rec.get("strike")
         pct_to_strike = (
-            f"{(strike_val - spot_val) / spot_val * 100:.1f}%"
-            if spot_val and strike_val
-            else "—"
+            f"{(strike_val - spot_val) / spot_val * 100:.1f}%" if spot_val and strike_val else "-"
         )
+
         html_parts.append(
             f"<tr>"
             f"<td><a href='{fidelity_url}' target='_blank' rel='noopener noreferrer'><strong>{ticker}</strong></a></td>"
@@ -140,8 +133,8 @@ def _render_csp_recommendations(
             f"<td>{_fmt_money(spot_val)}</td>"
             f"<td>{_fmt_money(strike_val)}</td>"
             f"<td>{pct_to_strike}</td>"
-            f"<td>{rec.get('expiration') or '—'}</td>"
-            f"<td>{rec.get('dte') or '—'}</td>"
+            f"<td>{rec.get('expiration') or '-'}</td>"
+            f"<td>{rec.get('dte') or '-'}</td>"
             f"<td>{_fmt_money(rec.get('premium'))}</td>"
             f"<td>{delta_display}</td>"
             f"<td>{ivr_display}</td>"
@@ -155,27 +148,25 @@ def _render_csp_recommendations(
 
     html_parts.append("</tbody></table>")
 
-    # IVR footnote
     has_proxy = any("proxy" in (r.get("ivr_source") or "") for r in recommendations)
     if has_proxy:
         html_parts.append(
-            "<p class='rec-footnote'>★ IVR is a proxy calculated from the option IV (or current 20-day HV) "
+            "<p class='rec-footnote'>* IVR is a proxy calculated from the option IV (or current 20-day HV) "
             "relative to the historical HV range over the available price history. "
             "True IV Rank requires historical implied volatility data not available via yfinance.</p>"
         )
 
-    # Exit rules
     html_parts.append(
         "<div class='exit-rules'>"
         "<strong>Exit Rules:</strong>"
         "<ul>"
-        "<li>Close the position at <strong>50–70% of max profit</strong> — lock in gains early.</li>"
-        "<li>Close or roll if unrealised loss reaches <strong>2× the premium received</strong>.</li>"
+        "<li>Close the position at <strong>50-70% of max profit</strong> - lock in gains early.</li>"
+        "<li>Close or roll if unrealised loss reaches <strong>2x the premium received</strong>.</li>"
         "</ul>"
         "</div>"
     )
 
-    html_parts.append("</div>")  # rec-body
+    html_parts.append("</div>")
     html_parts.append("</details>")
 
 
@@ -211,7 +202,7 @@ def write_reports(
         "details{margin-bottom:6px;}"
         "summary{cursor:pointer;padding:7px 12px;border-radius:4px;user-select:none;list-style:none;display:flex;align-items:center;gap:6px;}"
         "summary::-webkit-details-marker{display:none;}"
-        "summary::before{content:'▶';font-size:10px;transition:transform 0.15s;}"
+        "summary::before{content:'>';font-size:10px;transition:transform 0.15s;}"
         "details[open]>summary::before{transform:rotate(90deg);}"
         ".section>summary{font-size:16px;font-weight:700;background:#0969da;color:#fff;border:none;}"
         ".section>summary:hover{background:#0860ca;}"
@@ -247,21 +238,17 @@ def write_reports(
         ".exit-rules li{margin-bottom:2px;}"
         "</style></head><body>"
     )
-    html_parts.append(f"<h1>Daily Options Screening Report &mdash; {run_day}</h1>")
+    html_parts.append(f"<h1>Daily Options Screening Report - {run_day}</h1>")
     html_parts.append(f"<p class='note'>{disclaimer}</p>")
 
-    # ── CSP Recommendations (top of page) ─────────────────────────────────────
     if csp_recommendations:
         _render_csp_recommendations(csp_recommendations, html_parts)
 
-    # ── Screening results ──────────────────────────────────────────────────────
     if df.empty:
         html_parts.append("<p>No candidates passed filters today.</p>")
     else:
         def render_ticker_block(tdf: pd.DataFrame, ticker: str) -> None:
-            fidelity_url = (
-                f"https://digital.fidelity.com/ftgw/digital/options-research/?symbol={ticker}"
-            )
+            fidelity_url = f"https://digital.fidelity.com/ftgw/digital/options-research/?symbol={ticker}"
             n = len(tdf)
             tdf = tdf.copy()
             tdf["time_horizon"] = tdf["bucket"].map(horizon_map).fillna(tdf["bucket_label"])
@@ -269,11 +256,26 @@ def write_reports(
             tdf["horizon_rank"] = tdf["bucket"].map(horizon_order).fillna(99)
             tdf = tdf.sort_values(["horizon_rank", "score"], ascending=[True, False])
 
-            view = tdf[[
-                "time_horizon", "trade_type", "expiration", "strike", "spot", "mid",
-                "annualized_yield", "delta", "delta_source", "dte", "spread_pct",
-                "volume", "open_interest", "earnings_before_expiry", "score", "why_ranked_high",
-            ]].copy()
+            view = tdf[
+                [
+                    "time_horizon",
+                    "trade_type",
+                    "expiration",
+                    "strike",
+                    "spot",
+                    "mid",
+                    "annualized_yield",
+                    "delta",
+                    "delta_source",
+                    "dte",
+                    "spread_pct",
+                    "volume",
+                    "open_interest",
+                    "earnings_before_expiry",
+                    "score",
+                    "why_ranked_high",
+                ]
+            ].copy()
             view["annualized_yield"] = (view["annualized_yield"] * 100).map(lambda x: f"{x:.2f}%")
             view["spread_pct"] = (view["spread_pct"] * 100).map(lambda x: f"{x:.2f}%")
             view["delta"] = view["delta"].map(lambda x: "" if pd.isna(x) else f"{x:.3f}")
@@ -295,16 +297,13 @@ def write_reports(
             n = len(section_df)
             count_label = f"{n} candidate{'s' if n != 1 else ''}"
             html_parts.append(f"<details class='section {css_class}'>")
-            html_parts.append(
-                f"<summary>{title}<span class='count'>({count_label})</span></summary>"
-            )
+            html_parts.append(f"<summary>{title}<span class='count'>({count_label})</span></summary>")
             for ticker in sorted(section_df["ticker"].unique()):
                 render_ticker_block(section_df[section_df["ticker"] == ticker], ticker)
             html_parts.append("</details>")
 
         puts_df = df[df["strategy"] == "PUT"]
         calls_df = df[df["strategy"] == "CALL"]
-
         if not puts_df.empty:
             render_section(puts_df, "Cash-Secured Puts", "section-puts")
         if not calls_df.empty:

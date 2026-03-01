@@ -291,9 +291,8 @@ def build_option_records(
             )
             continue
 
-        # Delta unavailable after all attempts — default to 0 and count for warning
+        # Delta unavailable after all attempts; keep missing and count for warning.
         if delta_raw is None:
-            delta_raw = 0.0
             missing_delta_count += 1
 
         earnings_before_expiry = earnings_date is not None and earnings_date <= expiration and earnings_date >= today
@@ -315,7 +314,7 @@ def build_option_records(
             "volume": volume,
             "open_interest": oi,
             "implied_volatility": round(iv, 6) if iv is not None else None,
-            "delta": round(delta_raw, 6),
+            "delta": round(delta_raw, 6) if delta_raw is not None else None,
             "delta_source": delta_source,
             "dte": dte,
             "annualized_yield": ann_yield,
@@ -333,7 +332,7 @@ def build_option_records(
 
     if missing_delta_count > 0:
         logger.warning(
-            "%s %s %s: delta missing for %d/%d candidate(s) — defaulted to 0. "
+            "%s %s %s: delta missing for %d/%d candidate(s). "
             "Set risk_free_rate in config.yaml to enable Black-Scholes delta calculation.",
             ticker, strategy, expiration.isoformat(), missing_delta_count, len(rows),
         )
