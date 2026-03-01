@@ -163,7 +163,45 @@ def _process_ticker(ticker: str, provider: YFinanceProvider, config: Dict[str, A
     return ticker_result
 
 
+def validate_config(config: Dict[str, Any]) -> None:
+    """Raise ValueError for config values that would cause crashes or nonsensical results."""
+    penalty = float(config.get("earnings_risk_penalty", 0))
+    if not 0.0 <= penalty < 1.0:
+        raise ValueError(f"earnings_risk_penalty must be in [0, 1); got {penalty}")
+
+    min_yield = float(config.get("min_annualized_yield", 0))
+    if min_yield < 0:
+        raise ValueError(f"min_annualized_yield must be >= 0; got {min_yield}")
+
+    max_cand = int(config.get("max_candidates_per_ticker_per_bucket", 1))
+    if max_cand < 1:
+        raise ValueError(f"max_candidates_per_ticker_per_bucket must be >= 1; got {max_cand}")
+
+    if float(config.get("delta_put_min", -1)) > float(config.get("delta_put_max", 0)):
+        raise ValueError("delta_put_min must be <= delta_put_max")
+    if float(config.get("delta_call_min", 0)) > float(config.get("delta_call_max", 1)):
+        raise ValueError("delta_call_min must be <= delta_call_max")
+    if float(config.get("put_otm_pct_min", 0)) > float(config.get("put_otm_pct_max", 1)):
+        raise ValueError("put_otm_pct_min must be <= put_otm_pct_max")
+    if float(config.get("call_otm_pct_min", 0)) > float(config.get("call_otm_pct_max", 1)):
+        raise ValueError("call_otm_pct_min must be <= call_otm_pct_max")
+
+    dte_cw = int(config.get("dte_current_week_max_days", 7))
+    dte_nw_min = int(config.get("dte_next_week_min_days", 8))
+    dte_nw_max = int(config.get("dte_next_week_max_days", 14))
+    if dte_nw_min > dte_nw_max:
+        raise ValueError("dte_next_week_min_days must be <= dte_next_week_max_days")
+    if dte_nw_min <= dte_cw:
+        raise ValueError("dte_next_week_min_days must be > dte_current_week_max_days")
+
+    mo_min = int(config.get("monthly_target_dte_min", 30))
+    mo_max = int(config.get("monthly_target_dte_max", 45))
+    if mo_min > mo_max:
+        raise ValueError("monthly_target_dte_min must be <= monthly_target_dte_max")
+
+
 def run_pipeline(config: Dict[str, Any], logger) -> None:
+    validate_config(config)
     Path(config["output_dir"]).mkdir(parents=True, exist_ok=True)
     Path(config["log_dir"]).mkdir(parents=True, exist_ok=True)
     Path(config["cache_dir"]).mkdir(parents=True, exist_ok=True)

@@ -140,7 +140,7 @@ def _render_csp_recommendations(
             f"<td class='{css}'><strong>{escape(verdict)}</strong></td>"
             f"<td>{_fmt_money(spot_val)}</td>"
             f"<td>{_fmt_money(strike_val)}</td>"
-            f"<td>{pct_to_strike}</td>"
+            f"<td>{escape(pct_to_strike)}</td>"
             f"<td>{escape(str(rec.get('expiration') or '—'))}</td>"
             f"<td>{rec.get('dte') or '—'}</td>"
             f"<td>{_fmt_money(rec.get('premium'))}</td>"
@@ -249,7 +249,7 @@ def write_reports(
         "</style></head><body>"
     )
     html_parts.append(f"<h1>Daily Options Screening Report &mdash; {run_day}</h1>")
-    html_parts.append(f"<p class='note'>{disclaimer}</p>")
+    html_parts.append(f"<p class='note'>{escape(disclaimer)}</p>")
 
     # ── CSP Recommendations (top of page) ─────────────────────────────────────
     if csp_recommendations:

@@ -48,7 +48,7 @@ def compute_ivr_proxy(
     Formula:  IVR = (current_val - hv_low) / (hv_high - hv_low) * 100
 
     current_val = option IV when available, else latest 20-day HV.
-    Uses whatever price history is provided (typically 6 months).
+    Uses whatever price history is provided (typically 1 year).
 
     Returns (ivr 0–100 or None, human-readable source note).
     """
@@ -82,7 +82,7 @@ def compute_ivr_proxy(
 # ── Support levels ─────────────────────────────────────────────────────────────
 
 def get_support_levels(price_df: pd.DataFrame) -> Dict[str, Optional[float]]:
-    """Return 52-week low and 20-day swing low from available price history."""
+    """Return period low and 20-day swing low from available price history (typically 1 year)."""
     if price_df is None or price_df.empty:
         return {"low_52w": None, "swing_low_20d": None}
 
@@ -120,7 +120,6 @@ def recommend_csp_for_ticker(
     Works from the already-screened monthly PUT candidates produced by the main
     pipeline, then applies the tighter recommendation criteria on top.
     """
-    today = date.today()
     spot = float(technicals.get("spot", 0))
 
     ivr_min = float(rec_config.get("ivr_min", 30.0))
@@ -150,6 +149,10 @@ def recommend_csp_for_ticker(
         "annualized_yield": None,
     }
 
+    if spot <= 0:
+        base["reason"] = "Spot price unavailable"
+        return base
+
     # Monthly PUT candidates only
     monthly_puts = [
         c for c in candidates
@@ -167,10 +170,22 @@ def recommend_csp_for_ticker(
     ivr_value, ivr_source = compute_ivr_proxy(price_df, current_iv)
 
     # ── Earnings proximity ─────────────────────────────────────────────────────
+    # Reject if earnings falls within buffer days BEFORE the option expiration,
+    # not within buffer days from today.
+    exp_date = None
+    exp_str = monthly_puts[0].get("expiration")
+    if exp_str:
+        try:
+            exp_date = date.fromisoformat(str(exp_str))
+        except ValueError:
+            pass
+
     earnings_too_close = False
-    if earnings_date is not None:
-        days_to_earnings = (earnings_date - today).days
-        earnings_too_close = 0 <= days_to_earnings <= earnings_buffer
+    if earnings_date is not None and exp_date is not None:
+        # Earnings is "too close" if it occurs on or before expiry AND within
+        # earnings_buffer calendar days of that expiry date.
+        days_before_exp = (exp_date - earnings_date).days
+        earnings_too_close = earnings_date <= exp_date and days_before_exp <= earnings_buffer
 
     # ── Support levels ─────────────────────────────────────────────────────────
     support = get_support_levels(price_df)
@@ -215,8 +230,8 @@ def recommend_csp_for_ticker(
         base["ivr_source"] = ivr_source
         return base
 
-    # Best = max annualized yield among qualified candidates
-    best = max(qualified, key=lambda x: float(x.get("annualized_yield") or 0))
+    # Best = highest composite score (balances income, delta, trend, liquidity)
+    best = max(qualified, key=lambda x: float(x.get("score") or 0))
     strike = float(best["strike"])
     premium = float(best.get("mid", 0))
     delta_val = best.get("delta")
@@ -234,10 +249,14 @@ def recommend_csp_for_ticker(
         hard_fails.append(f"IVR {ivr_value:.0f}% below {ivr_min:.0f}% threshold")
     if ivr_value is None:
         soft_fails.append(f"IVR unavailable ({ivr_source})")
+    elif ivr_value >= 99.9:
+        soft_fails.append("IVR proxy at ceiling (100%) — likely overstated vs. 1-yr HV range")
+    elif ivr_value == 0.0:
+        soft_fails.append("IVR proxy at floor (0%) — current vol may be understated")
     if support_relaxed:
         soft_fails.append("strike above support levels — use caution")
-    if near_round:
-        soft_fails.append("strike near round number (may act as support)")
+    # near_round is noted in the output table but is not a negative signal —
+    # round numbers tend to act as support, which is favourable for a CSP.
 
     if hard_fails:
         verdict = "No"

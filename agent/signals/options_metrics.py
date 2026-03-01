@@ -44,7 +44,8 @@ def black_scholes_delta(
 ) -> Optional[float]:
     if spot <= 0 or strike <= 0 or dte <= 0 or iv is None or iv <= 0:
         return None
-    t = dte / 252.0  # yfinance IV is annualised on 252 trading days
+    # Convert calendar days to approximate trading days, then annualise on 252-day basis
+    t = (dte * 252 / 365) / 252.0  # == dte / 365.0, keeps calendar & vol bases consistent
     try:
         d1 = (math.log(spot / strike) + (risk_free_rate + 0.5 * iv * iv) * t) / (iv * math.sqrt(t))
     except (ValueError, ZeroDivisionError):
@@ -77,7 +78,7 @@ def get_dte(expiration: date, today: date) -> int:
 
 
 def select_expiration_buckets(expirations: List[date], today: date, config: Dict[str, Any], logger) -> Dict[str, Dict[str, Any]]:
-    future = sorted([d for d in expirations if d >= today])
+    future = sorted([d for d in expirations if d > today])  # exclude same-day (0-DTE)
 
     def _pick_in_range(min_d: int, max_d: int) -> Optional[date]:
         candidates = [d for d in future if min_d <= (d - today).days <= max_d]
