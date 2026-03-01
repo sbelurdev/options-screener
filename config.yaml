@@ -11,6 +11,9 @@ cash_secured_put_tickers:
   - TSML
 
 max_candidates_per_ticker_per_bucket: 5
+options_data_provider: yfinance
+market_data_provider: yfinance
+fundamentals_provider: yfinance
 delta_put_min: -0.35
 delta_put_max: -0.15
 delta_call_min: 0.15
@@ -25,6 +28,7 @@ monthly_target_dte_max: 45
 min_open_interest: null
 min_volume: null
 max_spread_pct: null
+html_min_mid_price: 0.5
 min_annualized_yield: 0.12
 risk_free_rate: null
 
