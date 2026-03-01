@@ -8,12 +8,18 @@ cash_secured_put_tickers:
   - TQQQ
   - NVDA
   - AMD
-  - TSML
+  - TSM
 
 max_candidates_per_ticker_per_bucket: 5
-options_data_provider: yfinance
+options_data_provider: public
 market_data_provider: yfinance
 fundamentals_provider: yfinance
+public_api_base_url: https://api.public.com
+public_api_key_env_var: PUBLIC_API_KEY
+public_access_token_validity_minutes: 15
+public_http_timeout_seconds: 20
+public_account_id: null
+public_underlying_instrument_type: EQUITY
 delta_put_min: -0.35
 delta_put_max: -0.15
 delta_call_min: 0.15

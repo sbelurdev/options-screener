@@ -17,7 +17,7 @@ def build_options_provider(config: Dict[str, Any], logger) -> OptionsChainProvid
     if name == "yfinance":
         return YFinanceProvider(logger=logger, log_dir=log_dir)
     if name == "public":
-        return PublicOptionsProvider(logger=logger, log_dir=log_dir)
+        return PublicOptionsProvider(logger=logger, config=config, log_dir=log_dir)
     raise ValueError(f"Unsupported options_data_provider='{name}'. Expected one of: yfinance, public")
 
 

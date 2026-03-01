@@ -4,3 +4,4 @@ yfinance>=0.2.50
 PyYAML>=6.0.0
 scipy>=1.11.0
 lxml>=5.2.0
+requests>=2.31.0
