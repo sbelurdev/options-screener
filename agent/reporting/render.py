@@ -84,6 +84,7 @@ def _render_csp_recommendations(
         "<th>Recommend</th>"
         "<th>Current Price</th>"
         "<th>Strike</th>"
+        "<th>% to Strike</th>"
         "<th>Expiration</th>"
         "<th>DTE</th>"
         "<th>Premium</th>"
@@ -125,12 +126,20 @@ def _render_csp_recommendations(
         css = verdict_class.get(verdict, "")
         delta_raw = rec.get("delta")
         delta_display = f"{abs(float(delta_raw)):.3f}" if delta_raw is not None else "—"
+        spot_val = rec.get("spot")
+        strike_val = rec.get("strike")
+        pct_to_strike = (
+            f"{(strike_val - spot_val) / spot_val * 100:.1f}%"
+            if spot_val and strike_val
+            else "—"
+        )
         html_parts.append(
             f"<tr>"
             f"<td><a href='{fidelity_url}' target='_blank' rel='noopener noreferrer'><strong>{ticker}</strong></a></td>"
             f"<td class='{css}'><strong>{verdict}</strong></td>"
-            f"<td>{_fmt_money(rec.get('spot'))}</td>"
-            f"<td>{_fmt_money(rec.get('strike'))}</td>"
+            f"<td>{_fmt_money(spot_val)}</td>"
+            f"<td>{_fmt_money(strike_val)}</td>"
+            f"<td>{pct_to_strike}</td>"
             f"<td>{rec.get('expiration') or '—'}</td>"
             f"<td>{rec.get('dte') or '—'}</td>"
             f"<td>{_fmt_money(rec.get('premium'))}</td>"
