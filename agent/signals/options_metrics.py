@@ -105,14 +105,21 @@ def select_expiration_buckets(expirations: List[date], today: date, config: Dict
             next_week = future[0]
         if next_week is not None:
             buckets["next_week"]["label"] = "Next Week (fallback)"
+    # Prevent next_week duplicating current_week
+    if next_week is not None and next_week == current:
+        next_week = None
     buckets["next_week"]["expiration"] = next_week
 
-    monthly_candidates = [d for d in future if is_third_friday(d) and d > today]
+    min_dte = int(config["monthly_target_dte_min"])
+    max_dte = int(config["monthly_target_dte_max"])
+    # Only consider third-Friday dates that also fall within the configured DTE range
+    monthly_candidates = [
+        d for d in future
+        if is_third_friday(d) and min_dte <= (d - today).days <= max_dte
+    ]
     if monthly_candidates:
         monthly = monthly_candidates[0]
     else:
-        min_dte = int(config["monthly_target_dte_min"])
-        max_dte = int(config["monthly_target_dte_max"])
         proxy = [d for d in future if min_dte <= (d - today).days <= max_dte]
         if proxy:
             target_mid = (min_dte + max_dte) / 2.0
@@ -121,6 +128,9 @@ def select_expiration_buckets(expirations: List[date], today: date, config: Dict
             monthly = future[-1] if future else None
         if monthly is not None:
             buckets["monthly"]["label"] = "Monthly (proxy)"
+    # Prevent monthly duplicating current_week or next_week
+    if monthly is not None and monthly in (current, next_week):
+        monthly = None
     buckets["monthly"]["expiration"] = monthly
 
     for b_name, b in buckets.items():

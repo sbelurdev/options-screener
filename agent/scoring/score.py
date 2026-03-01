@@ -39,11 +39,13 @@ def score_candidate(row: Dict[str, Any], technicals: Dict[str, float], config: D
         trend_reason = "bullish/neutral alignment"
     else:
         trend = 0.55
-        if spot < ma20:
-            trend += 0.20
-        if rsi >= 60:
+        if spot > ma20:
             trend += 0.15
-        trend_reason = "income-harvest trend fit"
+        if spot > ma50:
+            trend += 0.15
+        if rsi > 75:
+            trend -= 0.20  # Overbought — elevated call-away risk
+        trend_reason = "bullish/neutral alignment"
     trend_score = _clamp_0_1(trend)
 
     spread = float(row.get("spread_pct") or 1.0)

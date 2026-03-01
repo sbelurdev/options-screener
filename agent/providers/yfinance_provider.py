@@ -267,6 +267,7 @@ class YFinanceProvider(OptionsDataProvider):
 
         try:
             cal = t.calendar
+            today = date.today()
             if isinstance(cal, pd.DataFrame) and cal.empty:
                 self._append_rows(
                     ticker,
@@ -279,22 +280,30 @@ class YFinanceProvider(OptionsDataProvider):
                     ],
                 )
             if isinstance(cal, pd.DataFrame) and not cal.empty:
-                for col in cal.columns:
-                    val = cal[col].iloc[0]
-                    dt = pd.to_datetime(val, errors="coerce")
-                    if pd.notna(dt):
-                        self._append_rows(
-                            ticker,
-                            [
-                                {
-                                    "event": "earnings_lookup",
-                                    "status": "ok",
-                                    "earnings_date": dt.date().isoformat(),
-                                    "message": "source=calendar",
-                                }
-                            ],
-                        )
-                        return dt.date()
+                # Only look at rows whose index label mentions "Earnings" to avoid
+                # returning ex-dividend or other dates.
+                earnings_rows = [
+                    idx for idx in cal.index
+                    if "earning" in str(idx).lower()
+                ]
+                search_rows = earnings_rows if earnings_rows else list(cal.index)
+                for row_label in search_rows:
+                    for col in cal.columns:
+                        val = cal.loc[row_label, col]
+                        dt = pd.to_datetime(val, errors="coerce")
+                        if pd.notna(dt) and dt.date() >= today:
+                            self._append_rows(
+                                ticker,
+                                [
+                                    {
+                                        "event": "earnings_lookup",
+                                        "status": "ok",
+                                        "earnings_date": dt.date().isoformat(),
+                                        "message": f"source=calendar row={row_label}",
+                                    }
+                                ],
+                            )
+                            return dt.date()
         except Exception as exc:
             self.logger.info("%s: calendar earnings lookup failed: %s", ticker, exc)
             self._append_rows(
@@ -309,7 +318,7 @@ class YFinanceProvider(OptionsDataProvider):
             )
 
         try:
-            earnings = t.get_earnings_dates(limit=4)
+            earnings = t.get_earnings_dates(limit=8)
             if isinstance(earnings, pd.DataFrame) and earnings.empty:
                 self._append_rows(
                     ticker,
@@ -322,21 +331,23 @@ class YFinanceProvider(OptionsDataProvider):
                     ],
                 )
             if isinstance(earnings, pd.DataFrame) and not earnings.empty:
-                idx = earnings.index[0]
-                dt = pd.to_datetime(idx, errors="coerce")
-                if pd.notna(dt):
-                    self._append_rows(
-                        ticker,
-                        [
-                            {
-                                "event": "earnings_lookup",
-                                "status": "ok",
-                                "earnings_date": dt.date().isoformat(),
-                                "message": "source=earnings_dates",
-                            }
-                        ],
-                    )
-                    return dt.date()
+                today = date.today()
+                # Return the first FUTURE earnings date, skipping past ones.
+                for idx in earnings.index:
+                    dt = pd.to_datetime(idx, errors="coerce")
+                    if pd.notna(dt) and dt.date() >= today:
+                        self._append_rows(
+                            ticker,
+                            [
+                                {
+                                    "event": "earnings_lookup",
+                                    "status": "ok",
+                                    "earnings_date": dt.date().isoformat(),
+                                    "message": "source=earnings_dates",
+                                }
+                            ],
+                        )
+                        return dt.date()
         except Exception as exc:
             msg = str(exc)
             if (
