@@ -15,8 +15,9 @@ def compute_technicals(price_df: pd.DataFrame) -> Dict[str, float]:
     delta = close.diff()
     gain = delta.clip(lower=0)
     loss = -delta.clip(upper=0)
-    avg_gain = gain.rolling(14).mean()
-    avg_loss = loss.rolling(14).mean()
+    # Wilder's smoothing (alpha=1/14) matches RSI values shown on most platforms
+    avg_gain = gain.ewm(alpha=1 / 14, min_periods=14, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1 / 14, min_periods=14, adjust=False).mean()
     rs = avg_gain / avg_loss.replace(0, np.nan)
     rsi = 100 - (100 / (1 + rs))
 

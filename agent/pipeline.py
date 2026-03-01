@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from datetime import date
 from pathlib import Path
@@ -8,6 +8,8 @@ import pandas as pd
 
 from agent.providers.base import FundamentalsProvider, MarketDataProvider, OptionsChainProvider
 from agent.providers.factory import build_fundamentals_provider, build_market_provider, build_options_provider
+from agent.recommendation.csp_recommender import build_csp_recommendations
+
 from agent.reporting.render import write_reports
 from agent.scoring.score import score_candidate
 from agent.signals.options_metrics import build_option_records, select_expiration_buckets
@@ -24,7 +26,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "dte_current_week_max_days": 7,
     "dte_next_week_min_days": 8,
     "dte_next_week_max_days": 14,
-    "monthly_target_dte_min": 30,
+    "monthly_target_dte_min": 28,
     "monthly_target_dte_max": 45,
     "min_open_interest": None,
     "min_volume": None,
@@ -40,7 +42,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "public_account_id": None,
     "public_underlying_instrument_type": "EQUITY",
     "min_annualized_yield": 0.12,
-    "risk_free_rate": None,
+    "risk_free_rate": 0.05,
     "put_otm_pct_min": 0.05,
     "put_otm_pct_max": 0.15,
     "call_otm_pct_min": 0.05,
@@ -51,6 +53,16 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "cache_dir": "./cache",
     "price_history_period": "6mo",
     "price_history_interval": "1d",
+    "csp_recommendation": {
+        "enabled": True,
+        "max_recommendations": 10,
+        "ivr_min": 30.0,
+        "earnings_buffer_days": 7,
+        "delta_min": 0.10,
+        "delta_max": 0.25,
+        "use_support_filter": True,
+        "support_pct_buffer": 0.02,
+    },
 }
 
 DISCLAIMER = (
@@ -79,7 +91,10 @@ def _process_ticker(
         logger.warning("%s: no price history, skipping", ticker)
         return ticker_result
 
+    ticker_result["price_df"] = hist
+
     technicals = compute_technicals(hist)
+    ticker_result["technicals"] = technicals
     spot = float(technicals["spot"])
 
     expirations = options_provider.get_options_expirations(ticker)
@@ -89,6 +104,8 @@ def _process_ticker(
     earnings_date = fundamentals_provider.get_earnings_date(ticker)
     if earnings_date is None:
         logger.info("%s: earnings date unavailable", ticker)
+
+    ticker_result["earnings_date"] = earnings_date
 
     for bucket_name, bucket_meta in buckets.items():
         expiry = bucket_meta.get("expiration")
@@ -160,7 +177,45 @@ def _process_ticker(
     return ticker_result
 
 
+def validate_config(config: Dict[str, Any]) -> None:
+    """Raise ValueError for config values that would cause crashes or nonsensical results."""
+    penalty = float(config.get("earnings_risk_penalty", 0))
+    if not 0.0 <= penalty < 1.0:
+        raise ValueError(f"earnings_risk_penalty must be in [0, 1); got {penalty}")
+
+    min_yield = float(config.get("min_annualized_yield", 0))
+    if min_yield < 0:
+        raise ValueError(f"min_annualized_yield must be >= 0; got {min_yield}")
+
+    max_cand = int(config.get("max_candidates_per_ticker_per_bucket", 1))
+    if max_cand < 1:
+        raise ValueError(f"max_candidates_per_ticker_per_bucket must be >= 1; got {max_cand}")
+
+    if float(config.get("delta_put_min", -1)) > float(config.get("delta_put_max", 0)):
+        raise ValueError("delta_put_min must be <= delta_put_max")
+    if float(config.get("delta_call_min", 0)) > float(config.get("delta_call_max", 1)):
+        raise ValueError("delta_call_min must be <= delta_call_max")
+    if float(config.get("put_otm_pct_min", 0)) > float(config.get("put_otm_pct_max", 1)):
+        raise ValueError("put_otm_pct_min must be <= put_otm_pct_max")
+    if float(config.get("call_otm_pct_min", 0)) > float(config.get("call_otm_pct_max", 1)):
+        raise ValueError("call_otm_pct_min must be <= call_otm_pct_max")
+
+    dte_cw = int(config.get("dte_current_week_max_days", 7))
+    dte_nw_min = int(config.get("dte_next_week_min_days", 8))
+    dte_nw_max = int(config.get("dte_next_week_max_days", 14))
+    if dte_nw_min > dte_nw_max:
+        raise ValueError("dte_next_week_min_days must be <= dte_next_week_max_days")
+    if dte_nw_min <= dte_cw:
+        raise ValueError("dte_next_week_min_days must be > dte_current_week_max_days")
+
+    mo_min = int(config.get("monthly_target_dte_min", 30))
+    mo_max = int(config.get("monthly_target_dte_max", 45))
+    if mo_min > mo_max:
+        raise ValueError("monthly_target_dte_min must be <= monthly_target_dte_max")
+
+
 def run_pipeline(config: Dict[str, Any], logger) -> None:
+    validate_config(config)
     Path(config["output_dir"]).mkdir(parents=True, exist_ok=True)
     Path(config["log_dir"]).mkdir(parents=True, exist_ok=True)
     Path(config["cache_dir"]).mkdir(parents=True, exist_ok=True)
@@ -181,6 +236,7 @@ def run_pipeline(config: Dict[str, Any], logger) -> None:
 
     all_candidates: List[Dict[str, Any]] = []
     bucket_selection_summary: Dict[str, Dict[str, Any]] = {}
+    ticker_results_map: Dict[str, Dict[str, Any]] = {}
 
     logger.info(
         "Providers selected options=%s market=%s fundamentals=%s",
@@ -203,11 +259,14 @@ def run_pipeline(config: Dict[str, Any], logger) -> None:
             )
             bucket_selection_summary[ticker] = result.get("buckets", {})
             all_candidates.extend(result.get("candidates", []))
+            ticker_results_map[ticker] = result
         except Exception as exc:
             logger.exception("Failed processing %s: %s", ticker, exc)
             continue
 
-    csv_path, html_path = write_reports(all_candidates, config, DISCLAIMER)
+    csp_recommendations = build_csp_recommendations(ticker_results_map, csp_tickers, config)
+
+    csv_path, html_path = write_reports(all_candidates, config, DISCLAIMER, csp_recommendations)
 
     print("=" * 72)
     print("Options Screener Summary")
@@ -241,6 +300,14 @@ def run_pipeline(config: Dict[str, Any], logger) -> None:
             )
     else:
         print("No candidates passed filters today.")
+
+    if csp_recommendations:
+        print("\nCSP Recommendations:")
+        for rec in csp_recommendations:
+            verdict = rec["recommend"]
+            strike = f"${rec['strike']:.2f}" if rec["strike"] else "—"
+            ivr = f"{rec['ivr']:.0f}%" if rec["ivr"] is not None else "n/a"
+            print(f"  {rec['ticker']:6s}  {verdict:10s}  strike={strike}  IVR={ivr}  {rec['reason']}")
 
     print(f"\nCovered call tickers:      {', '.join(cc_tickers) or 'none'}")
     print(f"Cash-secured put tickers:  {', '.join(csp_tickers) or 'none'}")

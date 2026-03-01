@@ -1,5 +1,6 @@
 ﻿from __future__ import annotations
 
+import math
 from typing import Any, Dict, Tuple
 
 
@@ -11,7 +12,9 @@ def score_candidate(row: Dict[str, Any], technicals: Dict[str, float], config: D
     strategy = row["strategy"]
 
     ann_yield = float(row.get("annualized_yield") or 0.0)
-    income_score = _clamp_0_1(ann_yield / 0.35)
+    # Logarithmic scale keeps differentiation at high yields (e.g. leveraged ETFs)
+    # log1p(1.0) ≈ 0.693, so a 100% yield scores ~1.0; a 35% yield scores ~0.74
+    income_score = _clamp_0_1(math.log1p(ann_yield) / math.log1p(1.0))
 
     delta = row.get("delta")
     if delta is None:
@@ -39,11 +42,17 @@ def score_candidate(row: Dict[str, Any], technicals: Dict[str, float], config: D
         trend_reason = "bullish/neutral alignment"
     else:
         trend = 0.55
-        if spot < ma20:
-            trend += 0.20
-        if rsi >= 60:
+        if spot > ma20:
             trend += 0.15
-        trend_reason = "income-harvest trend fit"
+        else:
+            trend -= 0.15  # Below short-term MA — bearish for held shares
+        if spot > ma50:
+            trend += 0.15
+        else:
+            trend -= 0.15  # Below medium-term MA — bearish for held shares
+        if rsi > 75:
+            trend -= 0.20  # Overbought — elevated call-away risk
+        trend_reason = "bullish/neutral alignment"
     trend_score = _clamp_0_1(trend)
 
     spread = float(row.get("spread_pct") or 1.0)

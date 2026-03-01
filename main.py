@@ -60,7 +60,11 @@ def load_config(args: argparse.Namespace) -> Dict[str, Any]:
             loaded = yaml.safe_load(f) or {}
             if not isinstance(loaded, dict):
                 raise ValueError("Config YAML must parse to a dictionary")
-            config.update(loaded)
+            for key, value in loaded.items():
+                if isinstance(value, dict) and isinstance(config.get(key), dict):
+                    config[key] = {**config[key], **value}
+                else:
+                    config[key] = value
 
     if args.tickers:
         tickers = [t.strip().upper() for t in args.tickers.split(",") if t.strip()]
