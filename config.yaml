@@ -20,7 +20,7 @@ delta_call_max: 0.35
 dte_current_week_max_days: 7
 dte_next_week_min_days: 8
 dte_next_week_max_days: 14
-monthly_target_dte_min: 30
+monthly_target_dte_min: 28
 monthly_target_dte_max: 45
 
 min_open_interest: null
