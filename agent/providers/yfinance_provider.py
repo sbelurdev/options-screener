@@ -2,14 +2,31 @@
 
 import csv
 import logging
-from datetime import date, datetime
+import time
+from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import List, Optional, Set, Tuple
 
 import pandas as pd
 import yfinance as yf
 
 from agent.providers.base import OptionsDataProvider
+
+
+def _retry(fn, retries: int = 3, delay: float = 2.0):
+    """Call fn(); on exception retry up to `retries` times with exponential back-off."""
+    for attempt in range(retries):
+        try:
+            return fn()
+        except Exception as exc:
+            if attempt == retries - 1:
+                raise
+            wait = delay * (2 ** attempt)
+            logging.getLogger(__name__).warning(
+                "yfinance call failed (attempt %d/%d): %s — retrying in %.1fs",
+                attempt + 1, retries, exc, wait,
+            )
+            time.sleep(wait)
 
 
 class YFinanceProvider(OptionsDataProvider):
@@ -46,6 +63,8 @@ class YFinanceProvider(OptionsDataProvider):
         logging.getLogger("yfinance").setLevel(logging.ERROR)
         self.ticker_data_dir = Path(log_dir) / "ticker_data"
         self.ticker_data_dir.mkdir(parents=True, exist_ok=True)
+        # Cache of paths whose schema has already been verified this run
+        self._schema_ok: Set[Path] = set()
 
     def _csv_path(self, ticker: str) -> Path:
         return self.ticker_data_dir / f"{ticker.upper()}_yfinance_data.csv"
@@ -66,7 +85,9 @@ class YFinanceProvider(OptionsDataProvider):
         if not rows:
             return
         path = self._csv_path(ticker)
-        self._ensure_schema(path)
+        if path not in self._schema_ok:
+            self._ensure_schema(path)
+            self._schema_ok.add(path)
         try:
             is_new = not path.exists()
             with path.open("a", newline="", encoding="utf-8") as f:
@@ -76,7 +97,7 @@ class YFinanceProvider(OptionsDataProvider):
                 for row in rows:
                     payload = {k: "" for k in self.CSV_FIELDS}
                     payload.update(row)
-                    payload["timestamp_utc"] = datetime.utcnow().isoformat()
+                    payload["timestamp_utc"] = datetime.now(timezone.utc).isoformat()
                     payload["ticker"] = ticker.upper()
                     payload = {k: self._clean_value(v) for k, v in payload.items()}
                     writer.writerow(payload)
@@ -118,7 +139,7 @@ class YFinanceProvider(OptionsDataProvider):
 
     def get_price_history(self, ticker: str, period: str, interval: str) -> pd.DataFrame:
         t = yf.Ticker(ticker)
-        df = t.history(period=period, interval=interval, auto_adjust=False)
+        df = _retry(lambda: t.history(period=period, interval=interval, auto_adjust=False))
         if df is None or df.empty:
             self.logger.info(
                 "%s: yfinance history returned empty (period=%s interval=%s)",
@@ -163,7 +184,7 @@ class YFinanceProvider(OptionsDataProvider):
     def get_options_expirations(self, ticker: str) -> List[date]:
         t = yf.Ticker(ticker)
         expirations = []
-        for exp in list(t.options or []):
+        for exp in list(_retry(lambda: t.options) or []):
             try:
                 expirations.append(date.fromisoformat(exp))
             except ValueError:
@@ -185,7 +206,7 @@ class YFinanceProvider(OptionsDataProvider):
 
     def get_options_chain(self, ticker: str, expiration: date) -> Tuple[pd.DataFrame, pd.DataFrame]:
         t = yf.Ticker(ticker)
-        chain = t.option_chain(expiration.isoformat())
+        chain = _retry(lambda: t.option_chain(expiration.isoformat()))
         calls = chain.calls.copy() if chain and chain.calls is not None else pd.DataFrame()
         puts = chain.puts.copy() if chain and chain.puts is not None else pd.DataFrame()
 
@@ -227,7 +248,7 @@ class YFinanceProvider(OptionsDataProvider):
 
         # Skip earnings lookup for instrument types that do not report earnings.
         try:
-            info = t.info or {}
+            info = _retry(lambda: t.info) or {}
             quote_type = str(info.get("quoteType", "")).upper()
             self._append_rows(
                 ticker,
@@ -318,7 +339,7 @@ class YFinanceProvider(OptionsDataProvider):
             )
 
         try:
-            earnings = t.get_earnings_dates(limit=8)
+            earnings = _retry(lambda: t.get_earnings_dates(limit=8))
             if isinstance(earnings, pd.DataFrame) and earnings.empty:
                 self._append_rows(
                     ticker,

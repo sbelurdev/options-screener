@@ -176,9 +176,9 @@ def recommend_csp_for_ticker(
     support = get_support_levels(price_df)
 
     def _at_or_below_support(strike: float) -> bool:
-        if support["low_52w"] and strike <= support["low_52w"] * (1 + support_buffer):
+        if support["low_52w"] is not None and strike <= support["low_52w"] * (1 + support_buffer):
             return True
-        if support["swing_low_20d"] and strike <= support["swing_low_20d"] * (1 + support_buffer):
+        if support["swing_low_20d"] is not None and strike <= support["swing_low_20d"] * (1 + support_buffer):
             return True
         # Proxy: at least 5% OTM counts as a reasonable distance below current price
         if spot > 0 and (spot - strike) / spot >= 0.05:

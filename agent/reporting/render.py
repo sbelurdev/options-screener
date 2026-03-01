@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date
+from html import escape
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -135,21 +136,21 @@ def _render_csp_recommendations(
         )
         html_parts.append(
             f"<tr>"
-            f"<td><a href='{fidelity_url}' target='_blank' rel='noopener noreferrer'><strong>{ticker}</strong></a></td>"
-            f"<td class='{css}'><strong>{verdict}</strong></td>"
+            f"<td><a href='{escape(fidelity_url)}' target='_blank' rel='noopener noreferrer'><strong>{escape(ticker)}</strong></a></td>"
+            f"<td class='{css}'><strong>{escape(verdict)}</strong></td>"
             f"<td>{_fmt_money(spot_val)}</td>"
             f"<td>{_fmt_money(strike_val)}</td>"
             f"<td>{pct_to_strike}</td>"
-            f"<td>{rec.get('expiration') or '—'}</td>"
+            f"<td>{escape(str(rec.get('expiration') or '—'))}</td>"
             f"<td>{rec.get('dte') or '—'}</td>"
             f"<td>{_fmt_money(rec.get('premium'))}</td>"
             f"<td>{delta_display}</td>"
-            f"<td>{ivr_display}</td>"
+            f"<td>{escape(ivr_display)}</td>"
             f"<td>{_fmt_money(rec.get('max_profit'))}</td>"
             f"<td>{_fmt_money(rec.get('breakeven'))}</td>"
             f"<td>{_fmt_money(rec.get('cash_required'))}</td>"
-            f"<td>{yield_display}</td>"
-            f"<td class='reason-cell'>{reason_full}</td>"
+            f"<td>{escape(yield_display)}</td>"
+            f"<td class='reason-cell'>{escape(reason_full)}</td>"
             f"</tr>"
         )
 

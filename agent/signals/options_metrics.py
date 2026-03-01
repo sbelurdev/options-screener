@@ -44,7 +44,7 @@ def black_scholes_delta(
 ) -> Optional[float]:
     if spot <= 0 or strike <= 0 or dte <= 0 or iv is None or iv <= 0:
         return None
-    t = dte / 365.0
+    t = dte / 252.0  # yfinance IV is annualised on 252 trading days
     try:
         d1 = (math.log(spot / strike) + (risk_free_rate + 0.5 * iv * iv) * t) / (iv * math.sqrt(t))
     except (ValueError, ZeroDivisionError):

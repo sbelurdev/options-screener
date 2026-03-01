@@ -114,7 +114,7 @@ def _process_ticker(ticker: str, provider: YFinanceProvider, config: Dict[str, A
                 earnings_date=earnings_date,
                 config=config,
                 logger=logger,
-                decision_logger=lambda row: provider.log_option_screen_result(ticker, row),
+                decision_logger=lambda row, t=ticker: provider.log_option_screen_result(t, row),
             )
             if "PUT" in strategies
             else []
@@ -132,7 +132,7 @@ def _process_ticker(ticker: str, provider: YFinanceProvider, config: Dict[str, A
                 earnings_date=earnings_date,
                 config=config,
                 logger=logger,
-                decision_logger=lambda row: provider.log_option_screen_result(ticker, row),
+                decision_logger=lambda row, t=ticker: provider.log_option_screen_result(t, row),
             )
             if "CALL" in strategies
             else []
