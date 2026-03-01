@@ -30,7 +30,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "min_volume": None,
     "max_spread_pct": None,
     "min_annualized_yield": 0.12,
-    "risk_free_rate": None,
+    "risk_free_rate": 0.05,
     "put_otm_pct_min": 0.05,
     "put_otm_pct_max": 0.15,
     "call_otm_pct_min": 0.05,

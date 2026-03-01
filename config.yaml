@@ -6,9 +6,10 @@
 
 cash_secured_put_tickers:
   - TQQQ
+  - TECL
   - NVDA
   - AMD
-  - TSML
+  - TSM
 
 max_candidates_per_ticker_per_bucket: 5
 delta_put_min: -0.35
@@ -26,7 +27,7 @@ min_open_interest: null
 min_volume: null
 max_spread_pct: null
 min_annualized_yield: 0.12
-risk_free_rate: null
+risk_free_rate: 0.05
 
 put_otm_pct_min: 0.05
 put_otm_pct_max: 0.15
