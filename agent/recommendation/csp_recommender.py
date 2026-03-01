@@ -134,6 +134,7 @@ def recommend_csp_for_ticker(
         "ticker": ticker,
         "recommend": "No",
         "reason": "",
+        "spot": spot if spot > 0 else None,
         "strike": None,
         "expiration": None,
         "premium": None,
