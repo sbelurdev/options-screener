@@ -82,7 +82,7 @@ def _render_csp_recommendations(
         "<thead><tr>"
         "<th>Ticker</th>"
         "<th>Recommend</th>"
-        "<th>Stock Price</th>"
+        "<th>Current Price</th>"
         "<th>Strike</th>"
         "<th>Expiration</th>"
         "<th>DTE</th>"
