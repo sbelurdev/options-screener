@@ -82,8 +82,7 @@ def _recommend_for_bucket(
     technicals: Dict[str, float],
     earnings_date: Optional[date],
     min_acceptable_price: Optional[float],
-    ivr_value: Optional[float],
-    ivr_source: str,
+    price_df: pd.DataFrame,
     rec_config: Dict[str, Any],
 ) -> Dict[str, Any]:
     spot = float(technicals.get("spot", 0))
@@ -103,8 +102,8 @@ def _recommend_for_bucket(
         "expiration": None,
         "premium": None,
         "delta": None,
-        "ivr": ivr_value,
-        "ivr_source": ivr_source,
+        "ivr": None,
+        "ivr_source": None,
         "max_profit": None,
         "downside_breakeven": None,
         "near_resistance": False,
@@ -140,16 +139,30 @@ def _recommend_for_bucket(
     earnings_blocked = any(not _earnings_ok(c) for c in call_candidates if _delta_ok(c))
 
     if not qualified:
+        # Use any available IV from this bucket's pool for the reason message
+        pool_iv = next(
+            (float(c["implied_volatility"]) for c in call_candidates if c.get("implied_volatility")),
+            None,
+        )
+        ivr_value, ivr_source = compute_ivr_proxy(price_df, pool_iv)
         reasons: List[str] = []
         if ivr_value is not None and ivr_value < ivr_min:
             reasons.append(f"IVR {ivr_value:.0f}% below {ivr_min:.0f}% threshold")
         if earnings_blocked:
             reasons.append("earnings too close to expiration")
         reasons.append(f"no strike with |delta| {delta_min:.2f}–{delta_max:.2f}")
+        base["ivr"] = ivr_value
+        base["ivr_source"] = ivr_source
         base["reason"] = "; ".join(reasons)
         return base
 
     best = max(qualified, key=lambda x: float(x.get("score") or 0))
+
+    # Compute IVR from the recommended contract's own IV — keeps IVR consistent
+    # with the implied_volatility shown in the detail table for that contract.
+    best_iv = float(best["implied_volatility"]) if best.get("implied_volatility") else None
+    ivr_value, ivr_source = compute_ivr_proxy(price_df, best_iv)
+
     strike = float(best["strike"])
     premium = float(best.get("mid", 0))
     delta_val = best.get("delta")
@@ -251,13 +264,6 @@ def recommend_cc_for_ticker(
     ]
     monthly_calls = [c for c in all_calls if c.get("bucket") == "monthly"]
 
-    # IVR proxy — computed once, shared between both terms
-    current_iv = next(
-        (float(c["implied_volatility"]) for c in all_calls if c.get("implied_volatility")),
-        None,
-    )
-    ivr_value, ivr_source = compute_ivr_proxy(price_df, current_iv)
-
     resistance = get_resistance_levels(price_df)
 
     results = []
@@ -271,8 +277,7 @@ def recommend_cc_for_ticker(
                 technicals=technicals,
                 earnings_date=earnings_date,
                 min_acceptable_price=min_acceptable_price,
-                ivr_value=ivr_value,
-                ivr_source=ivr_source,
+                price_df=price_df,
                 rec_config=rec_config,
             )
         )
