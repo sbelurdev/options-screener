@@ -31,21 +31,57 @@ def _provider_name(config: Dict[str, Any], key: str, default: str) -> str:
 
 
 class _FallbackOptionsProvider(OptionsChainProvider):
-    """Wraps a primary provider and falls back to a secondary on empty results or errors."""
+    """Wraps PublicOptionsProvider and falls back to YFinanceProvider on empty results or errors.
 
-    def __init__(self, primary: OptionsChainProvider, secondary: OptionsChainProvider, logger) -> None:
+    Also attempts to enrich delta from Public greeks even when the chain is
+    served by yfinance, so Public delta is used wherever accessible.
+    """
+
+    def __init__(self, primary: PublicOptionsProvider, secondary: YFinanceProvider, logger) -> None:
         self._primary = primary
         self._secondary = secondary
         self._logger = logger
+        self.fallback_events: List[str] = []  # collected by pipeline for HTML report
+
+    def _record_fallback(self, message: str) -> None:
+        _prominent_warning(self._logger, message)
+        self.fallback_events.append(message)
+
+    def _enrich_delta_from_public(self, calls: pd.DataFrame, puts: pd.DataFrame) -> None:
+        """Best-effort: inject delta from Public greeks into yfinance chain DataFrames."""
+        symbols: List[str] = []
+        for df in [calls, puts]:
+            if not df.empty and "contractSymbol" in df.columns:
+                symbols.extend(
+                    self._primary._normalize_osi_symbol(s)
+                    for s in df["contractSymbol"].dropna()
+                )
+        if not symbols:
+            return
+        try:
+            greeks = self._primary._get_greeks(symbols)
+            if not greeks:
+                return
+            for df in [calls, puts]:
+                if df.empty or "contractSymbol" not in df.columns:
+                    continue
+                delta_vals = [
+                    (greeks.get(self._primary._normalize_osi_symbol(s)) or {}).get("delta")
+                    for s in df["contractSymbol"]
+                ]
+                df["delta"] = delta_vals
+            self._logger.info("Delta enriched from Public greeks for %d symbol(s)", len(greeks))
+        except Exception as exc:
+            self._logger.debug("Public delta enrichment failed (best-effort): %s", exc)
 
     def get_options_expirations(self, ticker: str) -> List[date]:
         try:
             result = self._primary.get_options_expirations(ticker)
         except Exception as exc:
-            _prominent_warning(self._logger, f"{ticker}: Public provider error fetching expirations ({exc}) — falling back to yfinance")
+            self._record_fallback(f"{ticker}: Public provider error fetching expirations ({exc}) — using yfinance")
             return self._secondary.get_options_expirations(ticker)
         if not result:
-            _prominent_warning(self._logger, f"{ticker}: Public provider returned no expirations — falling back to yfinance")
+            self._record_fallback(f"{ticker}: Public provider returned no expirations — using yfinance")
             return self._secondary.get_options_expirations(ticker)
         return result
 
@@ -53,11 +89,15 @@ class _FallbackOptionsProvider(OptionsChainProvider):
         try:
             calls, puts = self._primary.get_options_chain(ticker, expiration)
         except Exception as exc:
-            _prominent_warning(self._logger, f"{ticker} {expiration.isoformat()}: Public provider error fetching chain ({exc}) — falling back to yfinance")
-            return self._secondary.get_options_chain(ticker, expiration)
+            self._record_fallback(f"{ticker} {expiration.isoformat()}: Public provider error fetching chain ({exc}) — using yfinance")
+            calls, puts = self._secondary.get_options_chain(ticker, expiration)
+            self._enrich_delta_from_public(calls, puts)
+            return calls, puts
         if calls.empty and puts.empty:
-            _prominent_warning(self._logger, f"{ticker} {expiration.isoformat()}: Public provider returned empty chain — falling back to yfinance")
-            return self._secondary.get_options_chain(ticker, expiration)
+            self._record_fallback(f"{ticker} {expiration.isoformat()}: Public provider returned empty chain — using yfinance")
+            calls, puts = self._secondary.get_options_chain(ticker, expiration)
+            self._enrich_delta_from_public(calls, puts)
+            return calls, puts
         return calls, puts
 
     def log_option_screen_result(self, ticker: str, row: dict) -> None:

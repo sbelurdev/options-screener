@@ -266,7 +266,8 @@ def run_pipeline(config: Dict[str, Any], logger) -> None:
 
     csp_recommendations = build_csp_recommendations(ticker_results_map, csp_tickers, config)
 
-    csv_path, html_path = write_reports(all_candidates, config, DISCLAIMER, csp_recommendations)
+    fallback_events = getattr(options_provider, "fallback_events", [])
+    csv_path, html_path = write_reports(all_candidates, config, DISCLAIMER, csp_recommendations, fallback_events=fallback_events)
 
     print("=" * 72)
     print("Options Screener Summary")

@@ -185,6 +185,7 @@ def write_reports(
     config: Dict[str, Any],
     disclaimer: str,
     csp_recommendations: Optional[List[Dict[str, Any]]] = None,
+    fallback_events: Optional[List[str]] = None,
 ) -> Tuple[str, str]:
     output_dir = Path(config["output_dir"])
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -246,10 +247,24 @@ def write_reports(
         ".exit-rules{font-size:12px;background:#f0f7ff;border:1px solid #b6d4fe;border-radius:4px;padding:8px 12px;margin-top:4px;}"
         ".exit-rules ul{margin:4px 0 0 16px;padding:0;}"
         ".exit-rules li{margin-bottom:2px;}"
+        ".warn-banner{background:#fff3cd;border:2px solid #ffc107;border-radius:6px;padding:10px 14px;margin-bottom:14px;}"
+        ".warn-banner h3{margin:0 0 6px;color:#856404;font-size:14px;}"
+        ".warn-banner ul{margin:4px 0 0 18px;padding:0;color:#6c4a00;font-size:13px;}"
+        ".warn-banner li{margin-bottom:3px;}"
         "</style></head><body>"
     )
     html_parts.append(f"<h1>Daily Options Screening Report &mdash; {run_day}</h1>")
     html_parts.append(f"<p class='note'>{escape(disclaimer)}</p>")
+
+    # ── Provider fallback warnings ─────────────────────────────────────────────
+    if fallback_events:
+        html_parts.append("<div class='warn-banner'>")
+        html_parts.append("<h3>&#9888; Data Provider Warning: Public provider was inaccessible for some requests — yfinance was used as fallback</h3>")
+        html_parts.append("<ul>")
+        for event in fallback_events:
+            html_parts.append(f"<li>{escape(event)}</li>")
+        html_parts.append("</ul>")
+        html_parts.append("</div>")
 
     # ── CSP Recommendations (top of page) ─────────────────────────────────────
     if csp_recommendations:
