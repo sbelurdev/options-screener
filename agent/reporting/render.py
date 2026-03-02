@@ -258,12 +258,15 @@ def write_reports(
 
     # ── Provider fallback warnings ─────────────────────────────────────────────
     if fallback_events:
+        # Deduplicate and extract affected tickers (first token before ':' or ' ')
+        affected_tickers = sorted(set(e.split(":")[0].split(" ")[0] for e in fallback_events))
+        tickers_str = ", ".join(affected_tickers) if affected_tickers else "some tickers"
         html_parts.append("<div class='warn-banner'>")
-        html_parts.append("<h3>&#9888; Data Provider Warning: Public provider was inaccessible for some requests — yfinance was used as fallback</h3>")
-        html_parts.append("<ul>")
-        for event in fallback_events:
-            html_parts.append(f"<li>{escape(event)}</li>")
-        html_parts.append("</ul>")
+        html_parts.append(
+            f"<h3>&#9888; Data Provider Warning: Public provider was inaccessible &mdash; "
+            f"yfinance used as fallback for: {escape(tickers_str)}</h3>"
+            f"<p style='margin:0;font-size:12px;color:#6c4a00;'>Check the run log for details.</p>"
+        )
         html_parts.append("</div>")
 
     # ── CSP Recommendations (top of page) ─────────────────────────────────────
