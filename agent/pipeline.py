@@ -6,8 +6,10 @@ from typing import Any, Dict, List
 
 import pandas as pd
 
-from agent.providers.yfinance_provider import YFinanceProvider
+from agent.providers.base import FundamentalsProvider, MarketDataProvider, OptionsChainProvider
+from agent.providers.factory import build_fundamentals_provider, build_market_provider, build_options_provider
 from agent.recommendation.csp_recommender import build_csp_recommendations
+
 from agent.reporting.render import write_reports
 from agent.scoring.score import score_candidate
 from agent.signals.options_metrics import build_option_records, select_expiration_buckets
@@ -29,6 +31,16 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "min_open_interest": None,
     "min_volume": None,
     "max_spread_pct": None,
+    "html_min_mid_price": 0.5,
+    "options_data_provider": "yfinance",
+    "market_data_provider": "yfinance",
+    "fundamentals_provider": "yfinance",
+    "public_api_base_url": "https://api.public.com",
+    "public_api_key_env_var": "PUBLIC_API_KEY",
+    "public_access_token_validity_minutes": 15,
+    "public_http_timeout_seconds": 20,
+    "public_account_id": None,
+    "public_underlying_instrument_type": "EQUITY",
     "min_annualized_yield": 0.12,
     "risk_free_rate": 0.05,
     "put_otm_pct_min": 0.05,
@@ -59,17 +71,18 @@ DISCLAIMER = (
 )
 
 
-def _process_ticker(ticker: str, provider: YFinanceProvider, config: Dict[str, Any], logger, strategies: List[str]) -> Dict[str, Any]:
-    ticker_result: Dict[str, Any] = {
-        "ticker": ticker,
-        "buckets": {},
-        "candidates": [],
-        "technicals": {},
-        "earnings_date": None,
-        "price_df": pd.DataFrame(),
-    }
+def _process_ticker(
+    ticker: str,
+    options_provider: OptionsChainProvider,
+    market_provider: MarketDataProvider,
+    fundamentals_provider: FundamentalsProvider,
+    config: Dict[str, Any],
+    logger,
+    strategies: List[str],
+) -> Dict[str, Any]:
+    ticker_result: Dict[str, Any] = {"ticker": ticker, "buckets": {}, "candidates": []}
 
-    hist = provider.get_price_history(
+    hist = market_provider.get_price_history(
         ticker,
         period=config["price_history_period"],
         interval=config["price_history_interval"],
@@ -84,14 +97,15 @@ def _process_ticker(ticker: str, provider: YFinanceProvider, config: Dict[str, A
     ticker_result["technicals"] = technicals
     spot = float(technicals["spot"])
 
-    expirations = provider.get_options_expirations(ticker)
+    expirations = options_provider.get_options_expirations(ticker)
     buckets = select_expiration_buckets(expirations, date.today(), config, logger)
     ticker_result["buckets"] = buckets
 
-    earnings_date = provider.get_earnings_date(ticker)
-    ticker_result["earnings_date"] = earnings_date
+    earnings_date = fundamentals_provider.get_earnings_date(ticker)
     if earnings_date is None:
         logger.info("%s: earnings date unavailable", ticker)
+
+    ticker_result["earnings_date"] = earnings_date
 
     for bucket_name, bucket_meta in buckets.items():
         expiry = bucket_meta.get("expiration")
@@ -99,7 +113,7 @@ def _process_ticker(ticker: str, provider: YFinanceProvider, config: Dict[str, A
             logger.warning("%s: bucket=%s has no expiration", ticker, bucket_name)
             continue
 
-        calls_df, puts_df = provider.get_options_chain(ticker, expiry)
+        calls_df, puts_df = options_provider.get_options_chain(ticker, expiry)
 
         put_candidates = (
             build_option_records(
@@ -114,7 +128,7 @@ def _process_ticker(ticker: str, provider: YFinanceProvider, config: Dict[str, A
                 earnings_date=earnings_date,
                 config=config,
                 logger=logger,
-                decision_logger=lambda row, t=ticker: provider.log_option_screen_result(t, row),
+                decision_logger=lambda row: options_provider.log_option_screen_result(ticker, row),
             )
             if "PUT" in strategies
             else []
@@ -132,7 +146,7 @@ def _process_ticker(ticker: str, provider: YFinanceProvider, config: Dict[str, A
                 earnings_date=earnings_date,
                 config=config,
                 logger=logger,
-                decision_logger=lambda row, t=ticker: provider.log_option_screen_result(t, row),
+                decision_logger=lambda row: options_provider.log_option_screen_result(ticker, row),
             )
             if "CALL" in strategies
             else []
@@ -206,7 +220,9 @@ def run_pipeline(config: Dict[str, Any], logger) -> None:
     Path(config["log_dir"]).mkdir(parents=True, exist_ok=True)
     Path(config["cache_dir"]).mkdir(parents=True, exist_ok=True)
 
-    provider = YFinanceProvider(logger=logger, log_dir=config["log_dir"])
+    options_provider = build_options_provider(config, logger)
+    market_provider = build_market_provider(config, logger)
+    fundamentals_provider = build_fundamentals_provider(config, logger)
 
     cc_tickers: List[str] = [str(t).upper() for t in config.get("covered_call_tickers", [])]
     csp_tickers: List[str] = [str(t).upper() for t in config.get("cash_secured_put_tickers", [])]
@@ -222,11 +238,25 @@ def run_pipeline(config: Dict[str, Any], logger) -> None:
     bucket_selection_summary: Dict[str, Dict[str, Any]] = {}
     ticker_results_map: Dict[str, Dict[str, Any]] = {}
 
+    logger.info(
+        "Providers selected options=%s market=%s fundamentals=%s",
+        str(config.get("options_data_provider", "yfinance")).lower(),
+        str(config.get("market_data_provider", "yfinance")).lower(),
+        str(config.get("fundamentals_provider", "yfinance")).lower(),
+    )
     logger.info("Starting options screener for tickers=%s", ",".join(all_tickers))
 
     for ticker, strategies in ticker_strategies.items():
         try:
-            result = _process_ticker(ticker, provider, config, logger, strategies)
+            result = _process_ticker(
+                ticker,
+                options_provider=options_provider,
+                market_provider=market_provider,
+                fundamentals_provider=fundamentals_provider,
+                config=config,
+                logger=logger,
+                strategies=strategies,
+            )
             bucket_selection_summary[ticker] = result.get("buckets", {})
             all_candidates.extend(result.get("candidates", []))
             ticker_results_map[ticker] = result

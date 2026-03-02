@@ -272,14 +272,17 @@ def write_reports(
 
             view = tdf[[
                 "time_horizon", "trade_type", "expiration", "strike", "spot", "mid",
-                "annualized_yield", "delta", "delta_source", "dte", "spread_pct",
+                "annualized_yield", "delta", "implied_volatility", "delta_source", "dte", "spread_pct",
                 "volume", "open_interest", "earnings_before_expiry", "score", "why_ranked_high",
             ]].copy()
             view["annualized_yield"] = (view["annualized_yield"] * 100).map(lambda x: f"{x:.2f}%")
+            view["implied_volatility"] = view["implied_volatility"].map(
+                lambda x: "" if pd.isna(x) else f"{x * 100:.2f}%"
+            )
             view["spread_pct"] = (view["spread_pct"] * 100).map(lambda x: f"{x:.2f}%")
             view["delta"] = view["delta"].map(lambda x: "" if pd.isna(x) else f"{x:.3f}")
             view["score"] = view["score"].map(lambda x: f"{x:.3f}")
-            view = view.rename(columns={"why_ranked_high": "why"})
+            view = view.rename(columns={"implied_volatility": "impliedVolatility", "why_ranked_high": "why"})
 
             count_label = f"{n} candidate{'s' if n != 1 else ''}"
             html_parts.append("<details class='ticker-block'>")
