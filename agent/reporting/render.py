@@ -57,6 +57,130 @@ def _fmt_pct(val: Optional[float]) -> str:
     return f"{val:.1f}%"
 
 
+def _render_cc_recommendations(
+    recommendations: List[Dict[str, Any]],
+    html_parts: List[str],
+) -> None:
+    """Render the Covered Call recommendation table."""
+    if not recommendations:
+        return
+
+    yes_count = sum(1 for r in recommendations if r["recommend"] == "Yes")
+    borderline_count = sum(1 for r in recommendations if r["recommend"] == "Borderline")
+    total = len(recommendations)
+
+    html_parts.append("<details open class='section section-cc-rec'>")
+    html_parts.append(
+        f"<summary>Covered Call Recommendations"
+        f"<span class='count'>"
+        f"{yes_count} Yes &nbsp;·&nbsp; {borderline_count} Borderline &nbsp;·&nbsp; {total} total"
+        f"</span></summary>"
+    )
+    html_parts.append("<div class='cc-rec-body'>")
+    html_parts.append("<table class='cc-rec-table'>")
+    html_parts.append(
+        "<thead><tr>"
+        "<th>Ticker</th>"
+        "<th>Term</th>"
+        "<th>Recommend</th>"
+        "<th>Current Price</th>"
+        "<th>Strike</th>"
+        "<th>% OTM</th>"
+        "<th>Expiration</th>"
+        "<th>DTE</th>"
+        "<th>Premium</th>"
+        "<th>Delta</th>"
+        "<th>IVR *</th>"
+        "<th>Max Profit</th>"
+        "<th>Breakeven</th>"
+        "<th>Ann. Yield</th>"
+        "<th>Flags</th>"
+        "<th>Why</th>"
+        "</tr></thead><tbody>"
+    )
+
+    verdict_class = {"Yes": "rec-yes", "No": "rec-no", "Borderline": "rec-borderline"}
+
+    for rec in recommendations:
+        ticker = rec["ticker"]
+        verdict = rec["recommend"]
+        fidelity_url = f"https://digital.fidelity.com/ftgw/digital/options-research/?symbol={ticker}"
+
+        spot_val = rec.get("spot")
+        strike_val = rec.get("strike")
+        ann_yield = rec.get("annualized_yield")
+        yield_display = f"{ann_yield:.1%}" if ann_yield is not None else "—"
+
+        otm_pct = (
+            f"{(strike_val - spot_val) / spot_val * 100:.1f}%"
+            if spot_val and strike_val else "—"
+        )
+
+        ivr_display = _fmt_pct(rec.get("ivr"))
+        if "proxy" in (rec.get("ivr_source") or ""):
+            ivr_display += " ★"
+
+        delta_raw = rec.get("delta")
+        delta_display = f"{abs(float(delta_raw)):.3f}" if delta_raw is not None else "—"
+
+        # Build flags cell
+        flags: List[str] = []
+        if rec.get("near_resistance"):
+            flags.append("<span class='flag-res' title='Strike near resistance level'>&#9650; resistance</span>")
+        if rec.get("near_round_number"):
+            flags.append("<span class='flag-round' title='Strike near $5 round number'>&#9675; round#</span>")
+        if rec.get("below_min_price"):
+            min_p = rec.get("min_acceptable_price")
+            min_str = f"${min_p:.2f}" if min_p is not None else "min"
+            flags.append(f"<span class='flag-below' title='Strike below your minimum acceptable price'>&#9888; below {min_str}</span>")
+        flags_html = " ".join(flags) if flags else "—"
+
+        css = verdict_class.get(verdict, "")
+        html_parts.append(
+            f"<tr>"
+            f"<td><a href='{escape(fidelity_url)}' target='_blank' rel='noopener noreferrer'><strong>{escape(ticker)}</strong></a></td>"
+            f"<td><strong>{escape(rec.get('term', ''))}</strong></td>"
+            f"<td class='{css}'><strong>{escape(verdict)}</strong></td>"
+            f"<td>{_fmt_money(spot_val)}</td>"
+            f"<td>{_fmt_money(strike_val)}</td>"
+            f"<td>{escape(otm_pct)}</td>"
+            f"<td>{escape(str(rec.get('expiration') or '—'))}</td>"
+            f"<td>{rec.get('dte') or '—'}</td>"
+            f"<td>{_fmt_money(rec.get('premium'))}</td>"
+            f"<td>{delta_display}</td>"
+            f"<td>{escape(ivr_display)}</td>"
+            f"<td>{_fmt_money(rec.get('max_profit'))}</td>"
+            f"<td>{_fmt_money(rec.get('downside_breakeven'))}</td>"
+            f"<td>{escape(yield_display)}</td>"
+            f"<td>{flags_html}</td>"
+            f"<td class='reason-cell'>{escape(rec.get('reason', ''))}</td>"
+            f"</tr>"
+        )
+
+    html_parts.append("</tbody></table>")
+
+    has_proxy = any("proxy" in (r.get("ivr_source") or "") for r in recommendations)
+    if has_proxy:
+        html_parts.append(
+            "<p class='rec-footnote'>★ IVR is a proxy calculated from the option IV (or current 20-day HV) "
+            "relative to the historical HV range. True IV Rank requires historical implied volatility data.</p>"
+        )
+
+    html_parts.append(
+        "<div class='exit-rules'>"
+        "<strong>Exit Rules (Covered Calls):</strong>"
+        "<ul>"
+        "<li>Close the position at <strong>70% of max profit</strong> — capture most of the premium early.</li>"
+        "<li>Close or roll up/out if the stock rallies and unrealised loss reaches <strong>2&times; the premium received</strong>.</li>"
+        "<li>Roll to a <strong>higher strike or later expiration</strong> if assignment is imminent and you want to retain the shares.</li>"
+        "</ul>"
+        "</div>"
+    )
+
+    html_parts.append("</div>")  # cc-rec-body
+    html_parts.append("</details>")
+
+
 def _render_csp_recommendations(
     recommendations: List[Dict[str, Any]],
     html_parts: List[str],
@@ -185,6 +309,7 @@ def write_reports(
     config: Dict[str, Any],
     disclaimer: str,
     csp_recommendations: Optional[List[Dict[str, Any]]] = None,
+    cc_recommendations: Optional[List[Dict[str, Any]]] = None,
     fallback_events: Optional[List[str]] = None,
 ) -> Tuple[str, str]:
     output_dir = Path(config["output_dir"])
@@ -251,6 +376,16 @@ def write_reports(
         ".warn-banner h3{margin:0 0 6px;color:#856404;font-size:14px;}"
         ".warn-banner ul{margin:4px 0 0 18px;padding:0;color:#6c4a00;font-size:13px;}"
         ".warn-banner li{margin-bottom:3px;}"
+        ".section-cc-rec>summary{background:#0d6efd;color:#fff;font-size:17px;}"
+        ".section-cc-rec>summary:hover{background:#0b5ed7;}"
+        ".section-cc-rec>summary::before{color:#fff;}"
+        ".cc-rec-body{padding:8px 12px 12px;}"
+        ".cc-rec-table{margin:0 0 10px 0;width:100%;}"
+        ".cc-rec-table th{background:#dbeafe;font-size:12px;}"
+        ".cc-rec-table td{font-size:12px;}"
+        ".flag-res{color:#0d6efd;font-weight:600;}"
+        ".flag-round{color:#6c757d;}"
+        ".flag-below{color:#dc3545;font-weight:600;}"
         "</style></head><body>"
     )
     html_parts.append(f"<h1>Daily Options Screening Report &mdash; {run_day}</h1>")
@@ -269,7 +404,11 @@ def write_reports(
         )
         html_parts.append("</div>")
 
-    # ── CSP Recommendations (top of page) ─────────────────────────────────────
+    # ── CC Recommendations ─────────────────────────────────────────────────────
+    if cc_recommendations:
+        _render_cc_recommendations(cc_recommendations, html_parts)
+
+    # ── CSP Recommendations ────────────────────────────────────────────────────
     if csp_recommendations:
         _render_csp_recommendations(csp_recommendations, html_parts)
 

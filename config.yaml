@@ -21,10 +21,10 @@ public_access_token_validity_minutes: 15
 public_http_timeout_seconds: 20
 public_account_id: null
 public_underlying_instrument_type: EQUITY
-delta_put_min: -0.35
-delta_put_max: -0.15
-delta_call_min: 0.15
-delta_call_max: 0.35
+delta_put_min: -0.25
+delta_put_max: -0.1
+delta_call_min: 0.1
+delta_call_max: 0.25
 
 dte_current_week_max_days: 7
 dte_next_week_min_days: 8
@@ -45,6 +45,24 @@ call_otm_pct_min: 0.05
 call_otm_pct_max: 0.15
 
 earnings_risk_penalty: 0.20
+
+# ── Covered Call Recommendation Engine ────────────────────────────────────────
+# Set enabled: false to skip CC recommendations entirely.
+cc_recommendation:
+  enabled: true
+  max_recommendations: 20       # Max rows (2 per ticker: Short-Term + Monthly)
+  ivr_min: 30.0                 # IV Rank proxy must exceed this %
+  earnings_buffer_days: 7       # Reject if earnings fall within N days of expiration
+  delta_min: 0.10               # |delta| lower bound for recommended strike
+  delta_max: 0.25               # |delta| upper bound for recommended strike
+  short_term_dte_max: 16        # Short-term bucket: expirations up to this DTE
+  use_resistance_filter: true   # Flag strikes near resistance levels
+  resistance_pct_buffer: 0.02   # "Near resistance" if within 2% of a resistance level
+  min_acceptable_sale_prices:   # Optional per-ticker minimum strike (e.g. cost basis)
+    # MSFT: 380.0
+    # AAPL: 175.0
+    # NVDA: 100.0
+    # TQQQ: 50.0
 
 # ── CSP Recommendation Engine ─────────────────────────────────────────────────
 # Set enabled: false to skip recommendations entirely.

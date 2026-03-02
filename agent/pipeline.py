@@ -8,6 +8,7 @@ import pandas as pd
 
 from agent.providers.base import FundamentalsProvider, MarketDataProvider, OptionsChainProvider
 from agent.providers.factory import build_fundamentals_provider, build_market_provider, build_options_provider
+from agent.recommendation.cc_recommender import build_cc_recommendations
 from agent.recommendation.csp_recommender import build_csp_recommendations
 
 from agent.reporting.render import write_reports
@@ -53,6 +54,18 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "cache_dir": "./cache",
     "price_history_period": "6mo",
     "price_history_interval": "1d",
+    "cc_recommendation": {
+        "enabled": True,
+        "max_recommendations": 20,
+        "ivr_min": 30.0,
+        "earnings_buffer_days": 7,
+        "delta_min": 0.10,
+        "delta_max": 0.25,
+        "short_term_dte_max": 16,
+        "use_resistance_filter": True,
+        "resistance_pct_buffer": 0.02,
+        "min_acceptable_sale_prices": {},
+    },
     "csp_recommendation": {
         "enabled": True,
         "max_recommendations": 10,
@@ -264,10 +277,16 @@ def run_pipeline(config: Dict[str, Any], logger) -> None:
             logger.exception("Failed processing %s: %s", ticker, exc)
             continue
 
+    cc_recommendations = build_cc_recommendations(ticker_results_map, cc_tickers, config)
     csp_recommendations = build_csp_recommendations(ticker_results_map, csp_tickers, config)
 
     fallback_events = getattr(options_provider, "fallback_events", [])
-    csv_path, html_path = write_reports(all_candidates, config, DISCLAIMER, csp_recommendations, fallback_events=fallback_events)
+    csv_path, html_path = write_reports(
+        all_candidates, config, DISCLAIMER,
+        csp_recommendations=csp_recommendations,
+        cc_recommendations=cc_recommendations,
+        fallback_events=fallback_events,
+    )
 
     print("=" * 72)
     print("Options Screener Summary")
@@ -301,6 +320,14 @@ def run_pipeline(config: Dict[str, Any], logger) -> None:
             )
     else:
         print("No candidates passed filters today.")
+
+    if cc_recommendations:
+        print("\nCovered Call Recommendations:")
+        for rec in cc_recommendations:
+            verdict = rec["recommend"]
+            strike = f"${rec['strike']:.2f}" if rec["strike"] else "—"
+            ivr = f"{rec['ivr']:.0f}%" if rec["ivr"] is not None else "n/a"
+            print(f"  {rec['ticker']:6s}  {rec['term']:11s}  {verdict:10s}  strike={strike}  IVR={ivr}  {rec['reason']}")
 
     if csp_recommendations:
         print("\nCSP Recommendations:")
