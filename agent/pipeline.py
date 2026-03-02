@@ -56,8 +56,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "price_history_interval": "1d",
     "cc_recommendation": {
         "enabled": True,
-        "max_recommendations": 20,
-        "ivr_min": 30.0,
+        "max_recommendations": 50,
+        "max_suggestions_per_term": 3,
         "earnings_buffer_days": 7,
         "delta_min": 0.10,
         "delta_max": 0.25,

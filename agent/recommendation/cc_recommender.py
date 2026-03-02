@@ -1,20 +1,21 @@
 """
 Covered Call (CC) Recommendation Engine.
 
-Analyses monthly and short-term CALL candidates per ticker and produces two
-actionable trade recommendations per ticker:
-  - Short-Term: closest expiration within short_term_dte_max (default 16 DTE)
-  - Monthly:    closest expiration in the 30–45 DTE window
+Analyses monthly and short-term CALL candidates per ticker and produces
+multiple actionable suggestions per term per ticker:
+  - Short-Term: expirations within short_term_dte_max (default 16 DTE)
+  - Monthly:    expirations in the 28–45 DTE window
 
-Recommendation logic — a covered call is recommended only when ALL hold:
-  1. IV Rank (IVR) > ivr_min (default 30%) — premium is elevated enough to sell
-  2. No earnings announcement within earnings_buffer_days of expiration
-  3. Delta of the target strike is between delta_min and delta_max (0.10–0.25)
+At least one suggestion is always produced per term (even when no candidate
+perfectly meets the delta range criteria).
 
-A strike below min_acceptable_sale_price (optional per-ticker config) is a soft
-warning (Borderline), not a hard reject — the user may still want the income.
-A strike near a resistance level is flagged as a positive signal (stock may stall
-there, reducing assignment risk).
+Recommendation verdict per suggestion:
+  - Yes:        |delta| in [delta_min, delta_max], no earnings conflict, strike ≥ min_acceptable_price
+  - Borderline: delta outside target range, earnings too close, or strike below min_acceptable_price
+  (IVR is shown for reference but does NOT affect the verdict.)
+
+A strike near a resistance level is flagged as a positive signal (stock may
+stall there, reducing assignment risk).
 """
 
 from __future__ import annotations
@@ -29,8 +30,8 @@ from agent.recommendation.csp_recommender import compute_ivr_proxy
 
 DEFAULT_CC_REC_CONFIG: Dict[str, Any] = {
     "enabled": True,
-    "max_recommendations": 20,
-    "ivr_min": 30.0,
+    "max_recommendations": 50,
+    "max_suggestions_per_term": 3,
     "earnings_buffer_days": 7,
     "delta_min": 0.10,
     "delta_max": 0.25,
@@ -74,25 +75,13 @@ def _near_resistance(strike: float, resistance: Dict[str, Optional[float]], buff
 
 # ── Per-bucket recommendation ───────────────────────────────────────────────
 
-def _recommend_for_bucket(
+def _make_base_row(
     ticker: str,
     term_label: str,
-    call_candidates: List[Dict[str, Any]],
-    resistance: Dict[str, Optional[float]],
-    technicals: Dict[str, float],
-    earnings_date: Optional[date],
+    spot: float,
     min_acceptable_price: Optional[float],
-    price_df: pd.DataFrame,
-    rec_config: Dict[str, Any],
 ) -> Dict[str, Any]:
-    spot = float(technicals.get("spot", 0))
-    ivr_min = float(rec_config.get("ivr_min", 30.0))
-    earnings_buffer = int(rec_config.get("earnings_buffer_days", 7))
-    delta_min = float(rec_config.get("delta_min", 0.10))
-    delta_max = float(rec_config.get("delta_max", 0.25))
-    resistance_buffer = float(rec_config.get("resistance_pct_buffer", 0.02))
-
-    base: Dict[str, Any] = {
+    return {
         "ticker": ticker,
         "term": term_label,
         "recommend": "No",
@@ -114,9 +103,36 @@ def _recommend_for_bucket(
         "min_acceptable_price": min_acceptable_price,
     }
 
+
+def _recommend_for_bucket(
+    ticker: str,
+    term_label: str,
+    call_candidates: List[Dict[str, Any]],
+    resistance: Dict[str, Optional[float]],
+    technicals: Dict[str, float],
+    earnings_date: Optional[date],
+    min_acceptable_price: Optional[float],
+    price_df: pd.DataFrame,
+    rec_config: Dict[str, Any],
+    max_suggestions: int = 3,
+) -> List[Dict[str, Any]]:
+    """
+    Return up to max_suggestions ranked suggestions for one term bucket.
+    Always returns at least one row — even if no candidate perfectly meets
+    the delta range, the best available option is shown as Borderline.
+    IVR is computed for display only and does not affect the verdict.
+    """
+    spot = float(technicals.get("spot", 0))
+    earnings_buffer = int(rec_config.get("earnings_buffer_days", 7))
+    delta_min = float(rec_config.get("delta_min", 0.10))
+    delta_max = float(rec_config.get("delta_max", 0.25))
+    resistance_buffer = float(rec_config.get("resistance_pct_buffer", 0.02))
+
+    empty_row = _make_base_row(ticker, term_label, spot, min_acceptable_price)
+
     if not call_candidates:
-        base["reason"] = f"No {term_label} CALL candidates survived initial screening"
-        return base
+        empty_row["reason"] = f"No {term_label} CALL candidates available"
+        return [empty_row]
 
     def _delta_ok(c: Dict) -> bool:
         d = c.get("delta")
@@ -135,94 +151,76 @@ def _recommend_for_bucket(
         days_before = (c_exp - earnings_date).days
         return not (earnings_date <= c_exp and days_before <= earnings_buffer)
 
-    qualified = [c for c in call_candidates if _delta_ok(c) and _earnings_ok(c)]
-    earnings_blocked = any(not _earnings_ok(c) for c in call_candidates if _delta_ok(c))
+    # Prefer delta-qualified candidates; fill remaining slots from the rest.
+    by_score = lambda lst: sorted(lst, key=lambda x: float(x.get("score") or 0), reverse=True)
+    delta_ok = by_score([c for c in call_candidates if _delta_ok(c)])
+    delta_out = by_score([c for c in call_candidates if not _delta_ok(c)])
+    top_n = (delta_ok + delta_out)[:max_suggestions]
 
-    if not qualified:
-        # Use any available IV from this bucket's pool for the reason message
-        pool_iv = next(
-            (float(c["implied_volatility"]) for c in call_candidates if c.get("implied_volatility")),
-            None,
-        )
-        ivr_value, ivr_source = compute_ivr_proxy(price_df, pool_iv)
-        reasons: List[str] = []
-        if ivr_value is not None and ivr_value < ivr_min:
-            reasons.append(f"IVR {ivr_value:.0f}% below {ivr_min:.0f}% threshold")
-        if earnings_blocked:
-            reasons.append("earnings too close to expiration")
-        reasons.append(f"no strike with |delta| {delta_min:.2f}–{delta_max:.2f}")
-        base["ivr"] = ivr_value
-        base["ivr_source"] = ivr_source
-        base["reason"] = "; ".join(reasons)
-        return base
+    results: List[Dict[str, Any]] = []
+    for best in top_n:
+        strike = float(best["strike"])
+        premium = float(best.get("mid", 0))
+        delta_val = best.get("delta")
+        dte_val = best.get("dte")
 
-    best = max(qualified, key=lambda x: float(x.get("score") or 0))
+        near_round = _near_round_number(strike)
+        near_res = _near_resistance(strike, resistance, resistance_buffer)
+        below_min = min_acceptable_price is not None and strike < min_acceptable_price
+        delta_in_range = _delta_ok(best)
+        earnings_ok = _earnings_ok(best)
 
-    # Compute IVR from the recommended contract's own IV — keeps IVR consistent
-    # with the implied_volatility shown in the detail table for that contract.
-    best_iv = float(best["implied_volatility"]) if best.get("implied_volatility") else None
-    ivr_value, ivr_source = compute_ivr_proxy(price_df, best_iv)
+        # IVR — informational only, does not affect verdict
+        best_iv = float(best["implied_volatility"]) if best.get("implied_volatility") else None
+        ivr_value, ivr_source = compute_ivr_proxy(price_df, best_iv)
 
-    strike = float(best["strike"])
-    premium = float(best.get("mid", 0))
-    delta_val = best.get("delta")
-    dte_val = best.get("dte")
+        # ── Verdict ────────────────────────────────────────────────────────
+        issues: List[str] = []
+        if not delta_in_range:
+            d = abs(float(delta_val)) if delta_val is not None else None
+            if d is not None:
+                issues.append(f"delta {d:.2f} outside target {delta_min:.2f}–{delta_max:.2f}")
+            else:
+                issues.append("delta unavailable")
+        if not earnings_ok:
+            issues.append("earnings too close to expiration")
+        if below_min:
+            issues.append(f"strike ${strike:.2f} below min ${min_acceptable_price:.2f}")
 
-    near_round = _near_round_number(strike)
-    near_res = _near_resistance(strike, resistance, resistance_buffer)
-    below_min = min_acceptable_price is not None and strike < min_acceptable_price
+        if issues:
+            verdict = "Borderline"
+            reason = "; ".join(issues)
+        else:
+            verdict = "Yes"
+            d_str = f"{abs(float(delta_val)):.2f}" if delta_val is not None else "n/a"
+            reason = f"delta {d_str}"
+            if near_res:
+                reason += "; strike near resistance (favourable)"
 
-    # ── Verdict ─────────────────────────────────────────────────────────────
-    hard_fails: List[str] = []
-    soft_fails: List[str] = []
+        max_profit = round((strike - spot + premium) * 100, 2) if spot > 0 else None
+        downside_breakeven = round(spot - premium, 2) if spot > 0 else None
 
-    if ivr_value is not None and ivr_value < ivr_min:
-        hard_fails.append(f"IVR {ivr_value:.0f}% below {ivr_min:.0f}% threshold")
-    if ivr_value is None:
-        soft_fails.append(f"IVR unavailable ({ivr_source})")
-    elif ivr_value >= 99.9:
-        soft_fails.append("IVR proxy at ceiling (100%) — likely overstated vs. 1-yr HV range")
-    elif ivr_value == 0.0:
-        soft_fails.append("IVR proxy at floor (0%) — current vol may be understated")
-    if below_min:
-        soft_fails.append(
-            f"strike ${strike:.2f} below min acceptable ${min_acceptable_price:.2f} — assignment risk"
-        )
+        row = _make_base_row(ticker, term_label, spot, min_acceptable_price)
+        row.update({
+            "recommend": verdict,
+            "reason": reason,
+            "strike": strike,
+            "expiration": best.get("expiration"),
+            "premium": round(premium, 2),
+            "delta": round(float(delta_val), 3) if delta_val is not None else None,
+            "ivr": ivr_value,
+            "ivr_source": ivr_source,
+            "max_profit": max_profit,
+            "downside_breakeven": downside_breakeven,
+            "near_resistance": near_res,
+            "near_round_number": near_round,
+            "below_min_price": below_min,
+            "dte": dte_val,
+            "annualized_yield": best.get("annualized_yield"),
+        })
+        results.append(row)
 
-    if hard_fails:
-        verdict = "No"
-        reason = "; ".join(hard_fails)
-    elif soft_fails:
-        verdict = "Borderline"
-        reason = "; ".join(soft_fails)
-    else:
-        ivr_str = f"IVR {ivr_value:.0f}%" if ivr_value is not None else "IVR n/a"
-        reason = f"{ivr_str}; delta {abs(float(delta_val or 0)):.2f}"
-        if near_res:
-            reason += "; strike near resistance (favourable)"
-        verdict = "Yes"
-
-    max_profit = round((strike - spot + premium) * 100, 2) if spot > 0 else None
-    downside_breakeven = round(spot - premium, 2) if spot > 0 else None
-
-    return {
-        **base,
-        "recommend": verdict,
-        "reason": reason,
-        "strike": strike,
-        "expiration": best.get("expiration"),
-        "premium": round(premium, 2),
-        "delta": round(float(delta_val), 3) if delta_val is not None else None,
-        "ivr": ivr_value,
-        "ivr_source": ivr_source,
-        "max_profit": max_profit,
-        "downside_breakeven": downside_breakeven,
-        "near_resistance": near_res,
-        "near_round_number": near_round,
-        "below_min_price": below_min,
-        "dte": dte_val,
-        "annualized_yield": best.get("annualized_yield"),
-    }
+    return results
 
 
 # ── Per-ticker entry point ──────────────────────────────────────────────────
@@ -237,23 +235,19 @@ def recommend_cc_for_ticker(
     rec_config: Dict[str, Any],
 ) -> List[Dict[str, Any]]:
     """
-    Produce up to two CC recommendations (Short-Term + Monthly) for one ticker.
-    Returns a list of dicts (one per term).
+    Produce CC suggestions (Short-Term + Monthly) for one ticker.
+    Returns a flat list of suggestion dicts, ≥1 per term.
     """
     spot = float(technicals.get("spot", 0))
-    no_data_row = lambda term: {
-        "ticker": ticker, "term": term, "recommend": "No",
-        "reason": "Spot price unavailable",
-        "spot": None, "strike": None, "expiration": None, "premium": None,
-        "delta": None, "ivr": None, "ivr_source": None,
-        "max_profit": None, "downside_breakeven": None,
-        "near_resistance": False, "near_round_number": False, "below_min_price": False,
-        "dte": None, "annualized_yield": None, "min_acceptable_price": min_acceptable_price,
-    }
     if spot <= 0:
-        return [no_data_row("Short-Term"), no_data_row("Monthly")]
+        no_data = _make_base_row(ticker, "", spot, min_acceptable_price)
+        no_data["reason"] = "Spot price unavailable"
+        st = {**no_data, "term": "Short-Term"}
+        mo = {**no_data, "term": "Monthly"}
+        return [st, mo]
 
     short_term_dte_max = int(rec_config.get("short_term_dte_max", 16))
+    max_suggestions = int(rec_config.get("max_suggestions_per_term", 3))
 
     all_calls = [c for c in candidates if c.get("strategy") == "CALL"]
 
@@ -266,9 +260,9 @@ def recommend_cc_for_ticker(
 
     resistance = get_resistance_levels(price_df)
 
-    results = []
+    results: List[Dict[str, Any]] = []
     for term_label, pool in [("Short-Term", short_term_calls), ("Monthly", monthly_calls)]:
-        results.append(
+        results.extend(
             _recommend_for_bucket(
                 ticker=ticker,
                 term_label=term_label,
@@ -279,6 +273,7 @@ def recommend_cc_for_ticker(
                 min_acceptable_price=min_acceptable_price,
                 price_df=price_df,
                 rec_config=rec_config,
+                max_suggestions=max_suggestions,
             )
         )
     return results
@@ -293,14 +288,14 @@ def build_cc_recommendations(
 ) -> List[Dict[str, Any]]:
     """
     Run CC recommendation engine for all covered-call tickers.
-    Returns list sorted by verdict (Yes → Borderline → No) then yield desc.
+    Returns list grouped by ticker/term, sorted Yes → Borderline within each group.
     Capped at max_recommendations.
     """
     rec_config = config.get("cc_recommendation", {})
     if not rec_config.get("enabled", True):
         return []
 
-    max_recs = int(rec_config.get("max_recommendations", 20))
+    max_recs = int(rec_config.get("max_recommendations", 50))
     min_prices: Dict[str, Any] = rec_config.get("min_acceptable_sale_prices") or {}
 
     results: List[Dict[str, Any]] = []
@@ -319,8 +314,15 @@ def build_cc_recommendations(
         )
         results.extend(recs)
 
+    # Sort: within each (ticker, term) group keep Yes before Borderline;
+    # across tickers sort by best verdict then annualized yield.
     order = {"Yes": 0, "Borderline": 1, "No": 2}
     results.sort(
-        key=lambda r: (order.get(r["recommend"], 3), -(float(r.get("annualized_yield") or 0)))
+        key=lambda r: (
+            r["ticker"],
+            r["term"],
+            order.get(r["recommend"], 3),
+            -(float(r.get("annualized_yield") or 0)),
+        )
     )
     return results[:max_recs]

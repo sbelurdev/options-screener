@@ -162,8 +162,9 @@ def _render_cc_recommendations(
     has_proxy = any("proxy" in (r.get("ivr_source") or "") for r in recommendations)
     if has_proxy:
         html_parts.append(
-            "<p class='rec-footnote'>★ IVR is a proxy calculated from the option IV (or current 20-day HV) "
-            "relative to the historical HV range. True IV Rank requires historical implied volatility data.</p>"
+            "<p class='rec-footnote'>★ IVR shown for reference only — it does <strong>not</strong> affect the "
+            "recommendation verdict. Computed as HV Rank (current 20-day HV vs 1-year HV range). "
+            "True IV Rank requires historical implied volatility data.</p>"
         )
 
     html_parts.append(
