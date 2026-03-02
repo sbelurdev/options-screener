@@ -43,12 +43,14 @@ def compute_ivr_proxy(
     current_iv: Optional[float],
 ) -> Tuple[Optional[float], str]:
     """
-    IV Rank proxy using a rolling 20-day annualised HV series.
+    HV Rank (IV Rank proxy) using a rolling 20-day annualised HV series.
 
-    Formula:  IVR = (current_val - hv_low) / (hv_high - hv_low) * 100
+    Formula:  IVR = (current_HV - hv_low) / (hv_high - hv_low) * 100
 
-    current_val = option IV when available, else latest 20-day HV.
-    Uses whatever price history is provided (typically 1 year).
+    Always uses current 20-day HV vs historical HV range — a like-for-like
+    comparison.  Option IV is noted in the source string for reference but is
+    NOT used in the formula, because IV includes a volatility risk premium
+    (~20–40% above HV) that would inflate IVR and distort comparisons.
 
     Returns (ivr 0–100 or None, human-readable source note).
     """
@@ -68,14 +70,15 @@ def compute_ivr_proxy(
     if hv_high <= hv_low or hv_high < 1e-6:
         return None, "HV range too flat for IVR proxy"
 
-    if current_iv is not None and current_iv > 0:
-        current_val = current_iv
-        source = "proxy: option IV vs period HV range"
-    else:
-        current_val = float(hv_series.iloc[-1])
-        source = "proxy: current HV vs period HV range (option IV unavailable)"
+    # Always use current HV vs HV range (HV Rank) — consistent like-for-like.
+    # Option IV is NOT used in the formula because it includes a volatility risk
+    # premium (~20-40% above HV), which would inflate IVR and cause misleading
+    # comparisons, especially for leveraged ETFs where IV >> hv_high.
+    current_hv = float(hv_series.iloc[-1])
+    iv_note = f"; option IV={current_iv * 100:.0f}%" if current_iv is not None and current_iv > 0 else ""
+    source = f"proxy: HV rank (current HV={current_hv * 100:.0f}%{iv_note})"
 
-    ivr = max(0.0, min(100.0, (current_val - hv_low) / (hv_high - hv_low) * 100.0))
+    ivr = max(0.0, min(100.0, (current_hv - hv_low) / (hv_high - hv_low) * 100.0))
     return round(ivr, 1), source
 
 
