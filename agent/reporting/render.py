@@ -104,6 +104,7 @@ def _render_cc_recommendations(
 
     verdict_class = {"Yes": "rec-yes", "No": "rec-no", "Borderline": "rec-borderline"}
 
+    _GRP_COLORS = ("#ffffff", "#e8f0ff")
     prev_group = None
     group_idx = -1
     for rec in recommendations:
@@ -111,7 +112,7 @@ def _render_cc_recommendations(
         if group != prev_group:
             group_idx += 1
             prev_group = group
-        row_class = "group-a" if group_idx % 2 == 0 else "group-b"
+        row_bg = _GRP_COLORS[group_idx % 2]
         ticker = rec["ticker"]
         verdict = rec["recommend"]
         fidelity_url = f"https://digital.fidelity.com/ftgw/digital/options-research/?symbol={ticker}"
@@ -147,7 +148,7 @@ def _render_cc_recommendations(
 
         css = verdict_class.get(verdict, "")
         html_parts.append(
-            f"<tr class='{row_class}'>"
+            f"<tr style='background-color:{row_bg}'>"
             f"<td><a href='{escape(fidelity_url)}' target='_blank' rel='noopener noreferrer'><strong>{escape(ticker)}</strong></a></td>"
             f"<td><strong>{escape(rec.get('term', ''))}</strong></td>"
             f"<td>{escape(yield_display)}</td>"
@@ -237,6 +238,7 @@ def _render_csp_recommendations(
 
     verdict_class = {"Yes": "rec-yes", "No": "rec-no", "Borderline": "rec-borderline"}
 
+    _GRP_COLORS = ("#ffffff", "#e8f0ff")
     prev_term = None
     group_idx = -1
     for rec in recommendations:
@@ -244,7 +246,7 @@ def _render_csp_recommendations(
         if term != prev_term:
             group_idx += 1
             prev_term = term
-        row_class = "group-a" if group_idx % 2 == 0 else "group-b"
+        row_bg = _GRP_COLORS[group_idx % 2]
         ticker = rec["ticker"]
         verdict = rec["recommend"]
         fidelity_url = (
@@ -278,7 +280,7 @@ def _render_csp_recommendations(
             else "—"
         )
         html_parts.append(
-            f"<tr class='{row_class}'>"
+            f"<tr style='background-color:{row_bg}'>"
             f"<td><a href='{escape(fidelity_url)}' target='_blank' rel='noopener noreferrer'><strong>{escape(ticker)}</strong></a></td>"
             f"<td><strong>{escape(rec.get('term', ''))}</strong></td>"
             f"<td>{escape(yield_display)}</td>"
@@ -368,8 +370,6 @@ def write_reports(
         "th,td{border:1px solid #d0d7de;padding:3px 6px;font-size:12px;text-align:left;white-space:nowrap;vertical-align:top;}"
         "th{background:#f6f8fa;font-weight:600;}"
         "tr:nth-child(even){background:#f9f9f9;}"
-        "tr.group-a{background:#ffffff;}"
-        "tr.group-b{background:#eef2fb;}"
         ".count{font-weight:400;font-size:13px;opacity:0.85;margin-left:6px;}"
         ".note{font-size:12px;color:#444;padding:8px;background:#fff8c5;border:1px solid #e3b341;border-radius:4px;margin-bottom:12px;}"
         "a{color:inherit;}"
@@ -503,6 +503,7 @@ def write_reports(
                 tbl_html.append(f"<th>{escape(col)}</th>")
             tbl_html.append("</tr></thead><tbody>")
 
+            _GRP_COLORS = ("#ffffff", "#e8f0ff")
             prev_exp = None
             grp_idx = -1
             for _, row in view.iterrows():
@@ -510,8 +511,8 @@ def write_reports(
                 if exp_val != prev_exp:
                     grp_idx += 1
                     prev_exp = exp_val
-                grp_class = "group-a" if grp_idx % 2 == 0 else "group-b"
-                tbl_html.append(f"<tr class='{grp_class}'>")
+                row_bg = _GRP_COLORS[grp_idx % 2]
+                tbl_html.append(f"<tr style='background-color:{row_bg}'>")
                 for col in display_cols:
                     cell = row[col]
                     if col in ("Current Price", "Strike", "Premium"):
