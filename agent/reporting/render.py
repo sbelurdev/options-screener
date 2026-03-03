@@ -104,7 +104,14 @@ def _render_cc_recommendations(
 
     verdict_class = {"Yes": "rec-yes", "No": "rec-no", "Borderline": "rec-borderline"}
 
+    prev_group = None
+    group_idx = -1
     for rec in recommendations:
+        group = (rec["ticker"], rec.get("term", ""))
+        if group != prev_group:
+            group_idx += 1
+            prev_group = group
+        row_class = "group-a" if group_idx % 2 == 0 else "group-b"
         ticker = rec["ticker"]
         verdict = rec["recommend"]
         fidelity_url = f"https://digital.fidelity.com/ftgw/digital/options-research/?symbol={ticker}"
@@ -140,7 +147,7 @@ def _render_cc_recommendations(
 
         css = verdict_class.get(verdict, "")
         html_parts.append(
-            f"<tr>"
+            f"<tr class='{row_class}'>"
             f"<td><a href='{escape(fidelity_url)}' target='_blank' rel='noopener noreferrer'><strong>{escape(ticker)}</strong></a></td>"
             f"<td><strong>{escape(rec.get('term', ''))}</strong></td>"
             f"<td>{escape(yield_display)}</td>"
@@ -230,7 +237,14 @@ def _render_csp_recommendations(
 
     verdict_class = {"Yes": "rec-yes", "No": "rec-no", "Borderline": "rec-borderline"}
 
+    prev_term = None
+    group_idx = -1
     for rec in recommendations:
+        term = rec.get("term", "")
+        if term != prev_term:
+            group_idx += 1
+            prev_term = term
+        row_class = "group-a" if group_idx % 2 == 0 else "group-b"
         ticker = rec["ticker"]
         verdict = rec["recommend"]
         fidelity_url = (
@@ -264,7 +278,7 @@ def _render_csp_recommendations(
             else "—"
         )
         html_parts.append(
-            f"<tr>"
+            f"<tr class='{row_class}'>"
             f"<td><a href='{escape(fidelity_url)}' target='_blank' rel='noopener noreferrer'><strong>{escape(ticker)}</strong></a></td>"
             f"<td><strong>{escape(rec.get('term', ''))}</strong></td>"
             f"<td>{escape(yield_display)}</td>"
@@ -354,6 +368,8 @@ def write_reports(
         "th,td{border:1px solid #d0d7de;padding:3px 6px;font-size:12px;text-align:left;white-space:nowrap;vertical-align:top;}"
         "th{background:#f6f8fa;font-weight:600;}"
         "tr:nth-child(even){background:#f9f9f9;}"
+        "tr.group-a{background:#ffffff;}"
+        "tr.group-b{background:#eef2fb;}"
         ".count{font-weight:400;font-size:13px;opacity:0.85;margin-left:6px;}"
         ".note{font-size:12px;color:#444;padding:8px;background:#fff8c5;border:1px solid #e3b341;border-radius:4px;margin-bottom:12px;}"
         "a{color:inherit;}"
@@ -480,7 +496,43 @@ def write_reports(
                 f"<span class='count'>({count_label})</span>"
                 f"</summary>"
             )
-            html_parts.append(view.to_html(index=False, escape=True, classes="table"))
+            # Build HTML table manually to apply expiration-based row banding
+            display_cols = list(view.columns)
+            tbl_html = ["<table class='table'><thead><tr>"]
+            for col in display_cols:
+                tbl_html.append(f"<th>{escape(col)}</th>")
+            tbl_html.append("</tr></thead><tbody>")
+
+            prev_exp = None
+            grp_idx = -1
+            for _, row in view.iterrows():
+                exp_val = str(row.get("Expiration", ""))
+                if exp_val != prev_exp:
+                    grp_idx += 1
+                    prev_exp = exp_val
+                grp_class = "group-a" if grp_idx % 2 == 0 else "group-b"
+                tbl_html.append(f"<tr class='{grp_class}'>")
+                for col in display_cols:
+                    cell = row[col]
+                    if col in ("Current Price", "Strike", "Premium"):
+                        try:
+                            cell_str = f"${float(cell):,.2f}"
+                        except (ValueError, TypeError):
+                            cell_str = "—"
+                    elif col == "DTE":
+                        try:
+                            cell_str = str(int(float(cell)))
+                        except (ValueError, TypeError):
+                            cell_str = "—"
+                    else:
+                        try:
+                            cell_str = "—" if pd.isna(cell) else str(cell)
+                        except TypeError:
+                            cell_str = str(cell) if cell is not None else "—"
+                    tbl_html.append(f"<td>{escape(cell_str)}</td>")
+                tbl_html.append("</tr>")
+            tbl_html.append("</tbody></table>")
+            html_parts.append("".join(tbl_html))
             html_parts.append("</details>")
 
         def render_section(section_df: pd.DataFrame, title: str, css_class: str) -> None:
