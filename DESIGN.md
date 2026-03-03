@@ -32,8 +32,8 @@ An educational options screener that analyses covered call (CC) and cash-secured
 │                                │                              │
 │          ┌─────────────────────┼─────────────────────┐        │
 │          ▼                     ▼                     ▼        │
-│    technicals            bucket selection        earnings     │
-│    (MA, RSI, HV)     (curr wk / next wk / mo)    date        │
+│    technicals          expiration selection       earnings     │
+│    (MA, RSI, HV)      (all ≤14d + Fridays)       date        │
 │          │                     │                     │        │
 │          └─────────────────────┼─────────────────────┘        │
 │                                ▼                              │
@@ -217,38 +217,35 @@ fundamentals_provider: always yfinance
 
 ---
 
-## Step 1 — Expiration Bucket Selection
+## Step 1 — Expiration Date Selection
 
-From all available expiration dates, three time-horizon buckets are selected. All dates beyond 45 DTE are discarded first (hard cap).
+All available expiration dates are fetched from the provider. Dates beyond `max_dte` (default 45) are discarded (hard cap). The remainder are all fetched — no single-expiration-per-bucket picking.
 
 ```
 All expirations from provider
           │
           ▼
-  Filter: 1 ≤ DTE ≤ 45   ← hard cap, excludes same-day & LEAPS
+  Filter: 1 ≤ DTE ≤ max_dte (45)   ← hard cap, excludes same-day & LEAPS
           │
           ▼
- ┌────────────────────────────────────────────────┐
- │  BUCKET SELECTION (options_metrics.py L80-150) │
- │                                                │
- │  Current Week:  1 ≤ DTE ≤ 7                   │
- │    Pick: earliest expiration in range          │
- │    Fallback: nearest available if range empty  │
- │                                                │
- │  Next Week:     8 ≤ DTE ≤ 14                  │
- │    Pick: earliest expiration in range          │
- │    Fallback: next available after current_week │
- │    Guard: cannot duplicate current_week        │
- │                                                │
- │  Monthly:      28 ≤ DTE ≤ 45                  │
- │    Primary: 3rd Friday of month (standard exp) │
- │    Fallback: closest to 28d if no 3rd Friday   │
- │    Guard: cannot duplicate other buckets       │
- │    No LEAPS: if nothing in range → empty       │
- └────────────────────────────────────────────────┘
+ ┌──────────────────────────────────────────────────────┐
+ │  EXPIRATION SELECTION (options_metrics.py)           │
+ │                                                      │
+ │  DTE ≤ 14  (Short-Term window):                      │
+ │    ALL available expirations included                │
+ │    (captures daily and weekly options)               │
+ │                                                      │
+ │  14 < DTE ≤ 45  (Medium/Long-Term window):           │
+ │    Friday expirations only (standard weekly/monthly) │
+ └──────────────────────────────────────────────────────┘
           │
           ▼
-  3 buckets × each ticker → fetch options chain per bucket
+  Selected dates × each ticker → fetch options chain per date
+
+Each expiration is tagged with a term label based on DTE:
+  DTE ≤ 14        → Short-Term
+  15 ≤ DTE ≤ 28   → Medium-Term
+  DTE > 28        → Long-Term
 ```
 
 ---
@@ -363,13 +360,11 @@ Surviving candidates are ranked. Top 5 per bucket per strategy flow to the recom
 ### Covered Call Recommender
 
 ```
-Input: top-scored CALL candidates per ticker
-       (from current_week / next_week → Short-Term;
-        from monthly → Monthly)
+Input: top-scored CALL candidates per ticker, split by DTE into 3 pools
 
   recommend_cc_for_ticker()
   ─────────────────────────
-  Per term (Short-Term, Monthly):
+  Per term (Short-Term DTE≤14 / Medium-Term 15-28 / Long-Term >28):
 
     1. Sort candidates: delta-qualified first, then by score
     2. Take top N (max_suggestions_per_term = 3)
@@ -401,11 +396,12 @@ Input: top-scored CALL candidates per ticker
 ### Cash-Secured Put Recommender
 
 ```
-Input: top-scored PUT candidates per ticker (monthly bucket only)
+Input: top-scored PUT candidates per ticker, split by DTE into 3 pools
 
   recommend_csp_for_ticker()
   ──────────────────────────
-  Returns one recommendation per ticker.
+  Returns one recommendation per term per ticker (3 total):
+    Short-Term (DTE ≤ 14) / Medium-Term (15–28) / Long-Term (>28)
 
        VERDICT LOGIC:
        ┌───────────────────────────────────────────┐
@@ -455,18 +451,21 @@ Input: top-scored PUT candidates per ticker (monthly bucket only)
   │    ★ IVR displayed for reference only              │
   ├────────────────────────────────────────────────────┤
   │  [CSP Recommendations table]                       │
-  │    Gold theme; 1 row per ticker                    │
-  │    Columns: Ticker | Verdict | Spot | Strike |     │
-  │    %ToStrike | Exp | DTE | Premium | Delta |       │
-  │    IVR★ | MaxProfit | Breakeven | CashReq |        │
+  │    Gold theme; 1 row per term per ticker           │
+  │    Columns: Ticker | Term | Verdict | Spot |       │
+  │    Strike | %ToStrike | Exp | DTE | Premium |      │
+  │    Delta | IVR★ | MaxProfit | Breakeven | CashReq │
   │    AnnYield | Why                                  │
   ├────────────────────────────────────────────────────┤
   │  [Covered Calls screening] (collapsible, purple)   │
   │    Per-ticker collapsible blocks                   │
-  │    Shows all scored candidates with full detail    │
+  │    Columns match rec table (minus Recommend/Term): │
+  │    Term | Trade | Spot | Strike | %OTM | Exp |    │
+  │    DTE | Premium | Delta | IVR | MaxProfit |       │
+  │    Breakeven | AnnYield | Why                      │
   ├────────────────────────────────────────────────────┤
   │  [Cash-Secured Puts screening] (collapsible, green)│
-  │    Same layout as above                            │
+  │    Same layout as Covered Calls above              │
   └────────────────────────────────────────────────────┘
 
   Verdict colours:  ■ Yes = green   ■ Borderline = yellow   ■ No = red
@@ -483,7 +482,9 @@ Input: top-scored PUT candidates per ticker (monthly bucket only)
 | `cash_secured_put_tickers` | — | Tickers screened for PUT candidates |
 | `delta_call_min/max` | 0.10 / 0.25 | Delta range for CALL screening filter |
 | `delta_put_min/max` | -0.25 / -0.10 | Delta range for PUT screening filter |
-| `monthly_target_dte_min/max` | 28 / 45 | DTE window for monthly expiry |
+| `max_dte` | 45 | Hard cap — expirations beyond this ignored |
+| `short_term_max_dte` | 14 | DTE ≤ 14 → Short-Term (all expirations) |
+| `medium_term_max_dte` | 28 | DTE ≤ 28 → Medium-Term (Fridays only) |
 | `min_annualized_yield` | 12% | Contracts below this are dropped |
 | `earnings_risk_penalty` | 20% | Score reduction when earnings before expiry |
 | `risk_free_rate` | 5% | Used in Black-Scholes delta calculation |
@@ -513,7 +514,7 @@ options-screener/
 │   │   └── factory.py               ← provider selection + fallback wrapper
 │   │
 │   ├── signals/
-│   │   ├── options_metrics.py       ← bucket selection, filtering, BS delta
+│   │   ├── options_metrics.py       ← expiration selection, filtering, BS delta
 │   │   └── technicals.py            ← MA20, MA50, RSI14, HV20
 │   │
 │   ├── scoring/

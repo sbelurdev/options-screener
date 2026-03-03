@@ -1,9 +1,9 @@
 """
 Cash-Secured Put (CSP) Recommendation Engine.
 
-Analyses monthly-bucket PUT candidates per ticker and produces actionable
-trade recommendations. All criteria are configurable under csp_recommendation
-in config.yaml.
+Analyses PUT candidates per ticker across three time horizons and produces
+actionable trade recommendations. All criteria are configurable under
+csp_recommendation in config.yaml.
 
 Recommendation logic — a CSP is recommended only when ALL of the following hold:
   1. IV Rank (IVR) > ivr_min (default 30%)  — premium is elevated enough to sell
@@ -13,6 +13,11 @@ Recommendation logic — a CSP is recommended only when ALL of the following hol
 
 Criteria 1 and 3 are optional (use_support_filter, ivr_min can be set to 0 to skip).
 If IVR data is not derivable, the trade is flagged Borderline rather than rejected.
+
+Terms produced per ticker:
+  - Short-Term:  DTE ≤ 14
+  - Medium-Term: 15 ≤ DTE ≤ 28
+  - Long-Term:   DTE > 28
 """
 
 from __future__ import annotations
@@ -26,7 +31,7 @@ import pandas as pd
 
 DEFAULT_REC_CONFIG: Dict[str, Any] = {
     "enabled": True,
-    "max_recommendations": 10,
+    "max_recommendations": 30,
     "ivr_min": 30.0,
     "earnings_buffer_days": 7,
     "delta_min": 0.10,
@@ -107,21 +112,22 @@ def _near_round_number(strike: float) -> bool:
     return abs(strike - nearest) / max(strike, 1e-6) < 0.01
 
 
-# ── Per-ticker recommendation ──────────────────────────────────────────────────
+# ── Per-term recommendation helper ────────────────────────────────────────────
 
-def recommend_csp_for_ticker(
+def _recommend_csp_for_term(
     ticker: str,
-    candidates: List[Dict[str, Any]],
+    term_label: str,
+    put_candidates: List[Dict[str, Any]],
     price_df: pd.DataFrame,
     technicals: Dict[str, float],
     earnings_date: Optional[date],
     rec_config: Dict[str, Any],
 ) -> Dict[str, Any]:
     """
-    Produce one CSP recommendation for a single ticker.
+    Produce one CSP recommendation for a single ticker and time-horizon term.
 
-    Works from the already-screened monthly PUT candidates produced by the main
-    pipeline, then applies the tighter recommendation criteria on top.
+    Works from the already-screened PUT candidates for this term, then applies
+    the tighter recommendation criteria on top.
     """
     spot = float(technicals.get("spot", 0))
 
@@ -134,6 +140,7 @@ def recommend_csp_for_ticker(
 
     base: Dict[str, Any] = {
         "ticker": ticker,
+        "term": term_label,
         "recommend": "No",
         "reason": "",
         "spot": spot if spot > 0 else None,
@@ -156,27 +163,20 @@ def recommend_csp_for_ticker(
         base["reason"] = "Spot price unavailable"
         return base
 
-    # Monthly PUT candidates only
-    monthly_puts = [
-        c for c in candidates
-        if c.get("strategy") == "PUT" and c.get("bucket") == "monthly"
-    ]
-    if not monthly_puts:
-        base["reason"] = "No monthly PUT candidates survived initial screening"
+    if not put_candidates:
+        base["reason"] = f"No {term_label} PUT candidates survived initial screening"
         return base
 
     # ── IVR proxy ──────────────────────────────────────────────────────────────
     current_iv = next(
-        (float(c["implied_volatility"]) for c in monthly_puts if c.get("implied_volatility")),
+        (float(c["implied_volatility"]) for c in put_candidates if c.get("implied_volatility")),
         None,
     )
     ivr_value, ivr_source = compute_ivr_proxy(price_df, current_iv)
 
     # ── Earnings proximity ─────────────────────────────────────────────────────
-    # Reject if earnings falls within buffer days BEFORE the option expiration,
-    # not within buffer days from today.
     exp_date = None
-    exp_str = monthly_puts[0].get("expiration")
+    exp_str = put_candidates[0].get("expiration")
     if exp_str:
         try:
             exp_date = date.fromisoformat(str(exp_str))
@@ -185,8 +185,6 @@ def recommend_csp_for_ticker(
 
     earnings_too_close = False
     if earnings_date is not None and exp_date is not None:
-        # Earnings is "too close" if it occurs on or before expiry AND within
-        # earnings_buffer calendar days of that expiry date.
         days_before_exp = (exp_date - earnings_date).days
         earnings_too_close = earnings_date <= exp_date and days_before_exp <= earnings_buffer
 
@@ -198,7 +196,6 @@ def recommend_csp_for_ticker(
             return True
         if support["swing_low_20d"] is not None and strike <= support["swing_low_20d"] * (1 + support_buffer):
             return True
-        # Proxy: at least 5% OTM counts as a reasonable distance below current price
         if spot > 0 and (spot - strike) / spot >= 0.05:
             return True
         return False
@@ -211,14 +208,14 @@ def recommend_csp_for_ticker(
 
     # Filter by delta + support
     qualified = [
-        c for c in monthly_puts
+        c for c in put_candidates
         if _delta_ok(c) and (not use_support or _at_or_below_support(float(c.get("strike", 0))))
     ]
 
     # Relax support if nothing qualifies
     support_relaxed = False
     if not qualified:
-        qualified = [c for c in monthly_puts if _delta_ok(c)]
+        qualified = [c for c in put_candidates if _delta_ok(c)]
         support_relaxed = bool(qualified)
 
     if not qualified:
@@ -258,8 +255,6 @@ def recommend_csp_for_ticker(
         soft_fails.append("IVR proxy at floor (0%) — current vol may be understated")
     if support_relaxed:
         soft_fails.append("strike above support levels — use caution")
-    # near_round is noted in the output table but is not a negative signal —
-    # round numbers tend to act as support, which is favourable for a CSP.
 
     if hard_fails:
         verdict = "No"
@@ -292,6 +287,45 @@ def recommend_csp_for_ticker(
     }
 
 
+# ── Per-ticker entry point ─────────────────────────────────────────────────────
+
+def recommend_csp_for_ticker(
+    ticker: str,
+    candidates: List[Dict[str, Any]],
+    price_df: pd.DataFrame,
+    technicals: Dict[str, float],
+    earnings_date: Optional[date],
+    rec_config: Dict[str, Any],
+) -> List[Dict[str, Any]]:
+    """
+    Produce CSP recommendations (Short-Term / Medium-Term / Long-Term) for one ticker.
+    Returns a flat list of recommendation dicts, one per term.
+    """
+    all_puts = [c for c in candidates if c.get("strategy") == "PUT"]
+    short_term_puts  = [c for c in all_puts if (c.get("dte") or 99) <= 14]
+    medium_term_puts = [c for c in all_puts if 14 < (c.get("dte") or 0) <= 28]
+    long_term_puts   = [c for c in all_puts if (c.get("dte") or 0) > 28]
+
+    results: List[Dict[str, Any]] = []
+    for term_label, pool in [
+        ("Short-Term",  short_term_puts),
+        ("Medium-Term", medium_term_puts),
+        ("Long-Term",   long_term_puts),
+    ]:
+        results.append(
+            _recommend_csp_for_term(
+                ticker=ticker,
+                term_label=term_label,
+                put_candidates=pool,
+                price_df=price_df,
+                technicals=technicals,
+                earnings_date=earnings_date,
+                rec_config=rec_config,
+            )
+        )
+    return results
+
+
 # ── Batch entry point ──────────────────────────────────────────────────────────
 
 def build_csp_recommendations(
@@ -301,19 +335,19 @@ def build_csp_recommendations(
 ) -> List[Dict[str, Any]]:
     """
     Run recommendation engine for all CSP tickers.
-    Returns a list sorted by verdict (Yes → Borderline → No) then by yield desc.
+    Returns a list sorted by (ticker, term order, verdict, yield desc).
     Capped at max_recommendations.
     """
     rec_config = config.get("csp_recommendation", {})
     if not rec_config.get("enabled", True):
         return []
 
-    max_recs = int(rec_config.get("max_recommendations", 10))
+    max_recs = int(rec_config.get("max_recommendations", 30))
 
-    results = []
+    results: List[Dict[str, Any]] = []
     for ticker in csp_tickers:
         tr = ticker_results.get(ticker, {})
-        rec = recommend_csp_for_ticker(
+        recs = recommend_csp_for_ticker(
             ticker=ticker,
             candidates=tr.get("candidates", []),
             price_df=tr.get("price_df", pd.DataFrame()),
@@ -321,10 +355,16 @@ def build_csp_recommendations(
             earnings_date=tr.get("earnings_date"),
             rec_config=rec_config,
         )
-        results.append(rec)
+        results.extend(recs)
 
-    order = {"Yes": 0, "Borderline": 1, "No": 2}
+    term_order = {"Short-Term": 0, "Medium-Term": 1, "Long-Term": 2}
+    verdict_order = {"Yes": 0, "Borderline": 1, "No": 2}
     results.sort(
-        key=lambda r: (order.get(r["recommend"], 3), -(float(r.get("annualized_yield") or 0)))
+        key=lambda r: (
+            r["ticker"],
+            term_order.get(r.get("term", ""), 9),
+            verdict_order.get(r["recommend"], 3),
+            -(float(r.get("annualized_yield") or 0)),
+        )
     )
     return results[:max_recs]

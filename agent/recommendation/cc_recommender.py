@@ -1,10 +1,11 @@
 """
 Covered Call (CC) Recommendation Engine.
 
-Analyses monthly and short-term CALL candidates per ticker and produces
-multiple actionable suggestions per term per ticker:
-  - Short-Term: expirations within short_term_dte_max (default 16 DTE)
-  - Monthly:    expirations in the 28–45 DTE window
+Analyses CALL candidates per ticker and produces multiple actionable
+suggestions per term per ticker:
+  - Short-Term:  DTE ≤ 14
+  - Medium-Term: 15 ≤ DTE ≤ 28
+  - Long-Term:   DTE > 28
 
 At least one suggestion is always produced per term (even when no candidate
 perfectly meets the delta range criteria).
@@ -35,7 +36,6 @@ DEFAULT_CC_REC_CONFIG: Dict[str, Any] = {
     "earnings_buffer_days": 7,
     "delta_min": 0.10,
     "delta_max": 0.25,
-    "short_term_dte_max": 16,
     "use_resistance_filter": True,
     "resistance_pct_buffer": 0.02,
     "min_acceptable_sale_prices": {},  # ticker -> float, optional per-ticker floor
@@ -235,33 +235,34 @@ def recommend_cc_for_ticker(
     rec_config: Dict[str, Any],
 ) -> List[Dict[str, Any]]:
     """
-    Produce CC suggestions (Short-Term + Monthly) for one ticker.
+    Produce CC suggestions (Short-Term / Medium-Term / Long-Term) for one ticker.
     Returns a flat list of suggestion dicts, ≥1 per term.
     """
     spot = float(technicals.get("spot", 0))
     if spot <= 0:
         no_data = _make_base_row(ticker, "", spot, min_acceptable_price)
         no_data["reason"] = "Spot price unavailable"
-        st = {**no_data, "term": "Short-Term"}
-        mo = {**no_data, "term": "Monthly"}
-        return [st, mo]
+        return [
+            {**no_data, "term": "Short-Term"},
+            {**no_data, "term": "Medium-Term"},
+            {**no_data, "term": "Long-Term"},
+        ]
 
-    short_term_dte_max = int(rec_config.get("short_term_dte_max", 16))
     max_suggestions = int(rec_config.get("max_suggestions_per_term", 3))
 
     all_calls = [c for c in candidates if c.get("strategy") == "CALL"]
-
-    short_term_calls = [
-        c for c in all_calls
-        if c.get("bucket") in ("current_week", "next_week")
-        and (c.get("dte") or 99) <= short_term_dte_max
-    ]
-    monthly_calls = [c for c in all_calls if c.get("bucket") == "monthly"]
+    short_term_calls  = [c for c in all_calls if (c.get("dte") or 99) <= 14]
+    medium_term_calls = [c for c in all_calls if 14 < (c.get("dte") or 0) <= 28]
+    long_term_calls   = [c for c in all_calls if (c.get("dte") or 0) > 28]
 
     resistance = get_resistance_levels(price_df)
 
     results: List[Dict[str, Any]] = []
-    for term_label, pool in [("Short-Term", short_term_calls), ("Monthly", monthly_calls)]:
+    for term_label, pool in [
+        ("Short-Term",  short_term_calls),
+        ("Medium-Term", medium_term_calls),
+        ("Long-Term",   long_term_calls),
+    ]:
         results.extend(
             _recommend_for_bucket(
                 ticker=ticker,

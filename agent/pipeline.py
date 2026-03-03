@@ -9,11 +9,16 @@ import pandas as pd
 from agent.providers.base import FundamentalsProvider, MarketDataProvider, OptionsChainProvider
 from agent.providers.factory import build_fundamentals_provider, build_market_provider, build_options_provider
 from agent.recommendation.cc_recommender import build_cc_recommendations
-from agent.recommendation.csp_recommender import build_csp_recommendations
+from agent.recommendation.csp_recommender import build_csp_recommendations, compute_ivr_proxy
 
 from agent.reporting.render import write_reports
 from agent.scoring.score import score_candidate
-from agent.signals.options_metrics import build_option_records, select_expiration_buckets
+from agent.signals.options_metrics import (
+    build_option_records,
+    get_dte,
+    get_term_for_dte,
+    select_expiration_dates,
+)
 from agent.signals.technicals import compute_technicals
 
 DEFAULT_CONFIG: Dict[str, Any] = {
@@ -24,11 +29,10 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "delta_put_max": -0.15,
     "delta_call_min": 0.15,
     "delta_call_max": 0.35,
-    "dte_current_week_max_days": 7,
-    "dte_next_week_min_days": 8,
-    "dte_next_week_max_days": 14,
-    "monthly_target_dte_min": 28,
-    "monthly_target_dte_max": 45,
+    # DTE term boundaries (used for both expiration selection and candidate tagging)
+    "max_dte": 45,             # hard cap — no expirations beyond this
+    "short_term_max_dte": 14,  # DTE ≤ 14 → Short-Term  (all expirations fetched)
+    "medium_term_max_dte": 28, # DTE ≤ 28 → Medium-Term (Fridays only beyond 14)
     "min_open_interest": None,
     "min_volume": None,
     "max_spread_pct": None,
@@ -61,14 +65,13 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "earnings_buffer_days": 7,
         "delta_min": 0.10,
         "delta_max": 0.25,
-        "short_term_dte_max": 16,
         "use_resistance_filter": True,
         "resistance_pct_buffer": 0.02,
         "min_acceptable_sale_prices": {},
     },
     "csp_recommendation": {
         "enabled": True,
-        "max_recommendations": 10,
+        "max_recommendations": 30,
         "ivr_min": 30.0,
         "earnings_buffer_days": 7,
         "delta_min": 0.10,
@@ -93,7 +96,7 @@ def _process_ticker(
     logger,
     strategies: List[str],
 ) -> Dict[str, Any]:
-    ticker_result: Dict[str, Any] = {"ticker": ticker, "buckets": {}, "candidates": []}
+    ticker_result: Dict[str, Any] = {"ticker": ticker, "selected_expirations": [], "candidates": []}
 
     hist = market_provider.get_price_history(
         ticker,
@@ -111,8 +114,9 @@ def _process_ticker(
     spot = float(technicals["spot"])
 
     expirations = options_provider.get_options_expirations(ticker)
-    buckets = select_expiration_buckets(expirations, date.today(), config, logger)
-    ticker_result["buckets"] = buckets
+    max_dte = int(config.get("max_dte", 45))
+    selected_dates = select_expiration_dates(expirations, date.today(), max_dte)
+    ticker_result["selected_expirations"] = selected_dates
 
     earnings_date = fundamentals_provider.get_earnings_date(ticker)
     if earnings_date is None:
@@ -120,11 +124,11 @@ def _process_ticker(
 
     ticker_result["earnings_date"] = earnings_date
 
-    for bucket_name, bucket_meta in buckets.items():
-        expiry = bucket_meta.get("expiration")
-        if expiry is None:
-            logger.warning("%s: bucket=%s has no expiration", ticker, bucket_name)
-            continue
+    max_n = int(config["max_candidates_per_ticker_per_bucket"])
+
+    for expiry in selected_dates:
+        dte_days = get_dte(expiry, date.today())
+        bucket_name, bucket_label = get_term_for_dte(dte_days)
 
         calls_df, puts_df = options_provider.get_options_chain(ticker, expiry)
 
@@ -135,7 +139,7 @@ def _process_ticker(
                 options_df=puts_df,
                 expiration=expiry,
                 bucket_name=bucket_name,
-                bucket_label=bucket_meta.get("label", bucket_name),
+                bucket_label=bucket_label,
                 spot=spot,
                 technicals=technicals,
                 earnings_date=earnings_date,
@@ -153,7 +157,7 @@ def _process_ticker(
                 options_df=calls_df,
                 expiration=expiry,
                 bucket_name=bucket_name,
-                bucket_label=bucket_meta.get("label", bucket_name),
+                bucket_label=bucket_label,
                 spot=spot,
                 technicals=technicals,
                 earnings_date=earnings_date,
@@ -165,13 +169,12 @@ def _process_ticker(
             else []
         )
 
-        all_bucket = put_candidates + call_candidates
-        for row in all_bucket:
+        all_expiry = put_candidates + call_candidates
+        for row in all_expiry:
             score, why = score_candidate(row, technicals, config)
             row["score"] = round(score, 4)
             row["why_ranked_high"] = why
 
-        max_n = int(config["max_candidates_per_ticker_per_bucket"])
         top_puts = sorted(put_candidates, key=lambda x: x.get("score", 0.0), reverse=True)[:max_n]
         top_calls = sorted(call_candidates, key=lambda x: x.get("score", 0.0), reverse=True)[:max_n]
 
@@ -179,13 +182,19 @@ def _process_ticker(
         ticker_result["candidates"].extend(top_calls)
 
         logger.info(
-            "%s bucket=%s expiration=%s puts=%d calls=%d",
+            "%s term=%s expiration=%s puts=%d calls=%d",
             ticker,
             bucket_name,
             expiry.isoformat(),
             len(top_puts),
             len(top_calls),
         )
+
+    # Attach ticker-level IVR (HV Rank) to every candidate for the detail table
+    ticker_ivr, ticker_ivr_source = compute_ivr_proxy(hist, None)
+    for c in ticker_result["candidates"]:
+        c["ivr"] = ticker_ivr
+        c["ivr_source"] = ticker_ivr_source
 
     return ticker_result
 
@@ -213,18 +222,9 @@ def validate_config(config: Dict[str, Any]) -> None:
     if float(config.get("call_otm_pct_min", 0)) > float(config.get("call_otm_pct_max", 1)):
         raise ValueError("call_otm_pct_min must be <= call_otm_pct_max")
 
-    dte_cw = int(config.get("dte_current_week_max_days", 7))
-    dte_nw_min = int(config.get("dte_next_week_min_days", 8))
-    dte_nw_max = int(config.get("dte_next_week_max_days", 14))
-    if dte_nw_min > dte_nw_max:
-        raise ValueError("dte_next_week_min_days must be <= dte_next_week_max_days")
-    if dte_nw_min <= dte_cw:
-        raise ValueError("dte_next_week_min_days must be > dte_current_week_max_days")
-
-    mo_min = int(config.get("monthly_target_dte_min", 30))
-    mo_max = int(config.get("monthly_target_dte_max", 45))
-    if mo_min > mo_max:
-        raise ValueError("monthly_target_dte_min must be <= monthly_target_dte_max")
+    max_dte = int(config.get("max_dte", 45))
+    if max_dte < 7:
+        raise ValueError(f"max_dte must be >= 7; got {max_dte}")
 
 
 def run_pipeline(config: Dict[str, Any], logger) -> None:
@@ -248,7 +248,7 @@ def run_pipeline(config: Dict[str, Any], logger) -> None:
     all_tickers = list(ticker_strategies.keys())
 
     all_candidates: List[Dict[str, Any]] = []
-    bucket_selection_summary: Dict[str, Dict[str, Any]] = {}
+    expiration_summary: Dict[str, List[date]] = {}
     ticker_results_map: Dict[str, Dict[str, Any]] = {}
 
     logger.info(
@@ -270,7 +270,7 @@ def run_pipeline(config: Dict[str, Any], logger) -> None:
                 logger=logger,
                 strategies=strategies,
             )
-            bucket_selection_summary[ticker] = result.get("buckets", {})
+            expiration_summary[ticker] = result.get("selected_expirations", [])
             all_candidates.extend(result.get("candidates", []))
             ticker_results_map[ticker] = result
         except Exception as exc:
@@ -294,15 +294,12 @@ def run_pipeline(config: Dict[str, Any], logger) -> None:
     print(f"Tickers processed: {', '.join(all_tickers)}")
     print("Selected expirations by ticker:")
     for t in all_tickers:
-        buckets = bucket_selection_summary.get(t, {})
-        parts = []
-        for bucket in ["current_week", "next_week", "monthly"]:
-            meta = buckets.get(bucket, {})
-            exp = meta.get("expiration")
-            label = meta.get("label", bucket)
-            exp_str = exp.isoformat() if exp else "N/A"
-            parts.append(f"{label}: {exp_str}")
-        print(f"  - {t}: " + " | ".join(parts))
+        dates = expiration_summary.get(t, [])
+        if dates:
+            dates_str = "  ".join(d.isoformat() for d in dates)
+        else:
+            dates_str = "none"
+        print(f"  - {t}: {dates_str}")
 
     df = pd.DataFrame(all_candidates)
     if not df.empty:
@@ -327,7 +324,7 @@ def run_pipeline(config: Dict[str, Any], logger) -> None:
             verdict = rec["recommend"]
             strike = f"${rec['strike']:.2f}" if rec["strike"] else "—"
             ivr = f"{rec['ivr']:.0f}%" if rec["ivr"] is not None else "n/a"
-            print(f"  {rec['ticker']:6s}  {rec['term']:11s}  {verdict:10s}  strike={strike}  IVR={ivr}  {rec['reason']}")
+            print(f"  {rec['ticker']:6s}  {rec['term']:12s}  {verdict:10s}  strike={strike}  IVR={ivr}  {rec['reason']}")
 
     if csp_recommendations:
         print("\nCSP Recommendations:")
@@ -335,7 +332,7 @@ def run_pipeline(config: Dict[str, Any], logger) -> None:
             verdict = rec["recommend"]
             strike = f"${rec['strike']:.2f}" if rec["strike"] else "—"
             ivr = f"{rec['ivr']:.0f}%" if rec["ivr"] is not None else "n/a"
-            print(f"  {rec['ticker']:6s}  {verdict:10s}  strike={strike}  IVR={ivr}  {rec['reason']}")
+            print(f"  {rec['ticker']:6s}  {rec.get('term',''):12s}  {verdict:10s}  strike={strike}  IVR={ivr}  {rec['reason']}")
 
     print(f"\nCovered call tickers:      {', '.join(cc_tickers) or 'none'}")
     print(f"Cash-secured put tickers:  {', '.join(csp_tickers) or 'none'}")

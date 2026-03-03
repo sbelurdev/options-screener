@@ -32,7 +32,10 @@ def _empty_df() -> pd.DataFrame:
             "dte",
             "annualized_yield",
             "breakeven",
+            "max_profit",
             "otm_pct",
+            "ivr",
+            "ivr_source",
             "earnings_date",
             "earnings_before_expiry",
             "ma20",
@@ -207,6 +210,7 @@ def _render_csp_recommendations(
     html_parts.append(
         "<thead><tr>"
         "<th>Ticker</th>"
+        "<th>Term</th>"
         "<th>Recommend</th>"
         "<th>Current Price</th>"
         "<th>Strike</th>"
@@ -262,6 +266,7 @@ def _render_csp_recommendations(
         html_parts.append(
             f"<tr>"
             f"<td><a href='{escape(fidelity_url)}' target='_blank' rel='noopener noreferrer'><strong>{escape(ticker)}</strong></a></td>"
+            f"<td><strong>{escape(rec.get('term', ''))}</strong></td>"
             f"<td class='{css}'><strong>{escape(verdict)}</strong></td>"
             f"<td>{_fmt_money(spot_val)}</td>"
             f"<td>{_fmt_money(strike_val)}</td>"
@@ -325,8 +330,7 @@ def write_reports(
         df = df.sort_values(["ticker", "bucket", "strategy", "score"], ascending=[True, True, True, False])
     df.to_csv(csv_path, index=False)
 
-    horizon_map = {"current_week": "Current Week", "next_week": "Next Week", "monthly": "Monthly"}
-    horizon_order = {"current_week": 0, "next_week": 1, "monthly": 2}
+    term_order_map = {"Short-Term": 0, "Medium-Term": 1, "Long-Term": 2}
     trade_map = {"PUT": "SELL PUT", "CALL": "Covered CALL"}
 
     html_parts: List[str] = []
@@ -423,24 +427,51 @@ def write_reports(
             )
             n = len(tdf)
             tdf = tdf.copy()
-            tdf["time_horizon"] = tdf["bucket"].map(horizon_map).fillna(tdf["bucket_label"])
             tdf["trade_type"] = tdf["strategy"].map(trade_map).fillna(tdf["strategy"])
-            tdf["horizon_rank"] = tdf["bucket"].map(horizon_order).fillna(99)
-            tdf = tdf.sort_values(["horizon_rank", "score"], ascending=[True, False])
+            tdf["term_rank"] = tdf["bucket_label"].map(term_order_map).fillna(99)
+            tdf = tdf.sort_values(["term_rank", "score"], ascending=[True, False])
+
+            # Ensure optional columns exist (may be absent if candidates came from an older run)
+            for col in ("ivr", "max_profit"):
+                if col not in tdf.columns:
+                    tdf[col] = None
 
             view = tdf[[
-                "time_horizon", "trade_type", "expiration", "strike", "spot", "mid",
-                "annualized_yield", "delta", "implied_volatility", "delta_source", "dte", "spread_pct",
-                "volume", "open_interest", "earnings_before_expiry", "score", "why_ranked_high",
+                "bucket_label", "trade_type", "spot", "strike", "otm_pct",
+                "expiration", "dte", "mid", "delta", "ivr", "max_profit",
+                "breakeven", "annualized_yield", "why_ranked_high",
             ]].copy()
-            view["annualized_yield"] = (view["annualized_yield"] * 100).map(lambda x: f"{x:.2f}%")
-            view["implied_volatility"] = view["implied_volatility"].map(
-                lambda x: "" if pd.isna(x) else f"{x * 100:.2f}%"
+            view["annualized_yield"] = (view["annualized_yield"] * 100).map(
+                lambda x: f"{x:.2f}%" if pd.notna(x) else "—"
             )
-            view["spread_pct"] = (view["spread_pct"] * 100).map(lambda x: f"{x:.2f}%")
-            view["delta"] = view["delta"].map(lambda x: "" if pd.isna(x) else f"{x:.3f}")
-            view["score"] = view["score"].map(lambda x: f"{x:.3f}")
-            view = view.rename(columns={"implied_volatility": "impliedVolatility", "why_ranked_high": "why"})
+            view["otm_pct"] = view["otm_pct"].map(
+                lambda x: f"{x * 100:.2f}%" if pd.notna(x) else "—"
+            )
+            view["delta"] = view["delta"].map(
+                lambda x: "—" if pd.isna(x) else f"{x:.3f}"
+            )
+            view["ivr"] = view["ivr"].map(
+                lambda x: "—" if pd.isna(x) or x is None else f"{x:.1f}%"
+            )
+            view["max_profit"] = view["max_profit"].map(
+                lambda x: "—" if pd.isna(x) or x is None else f"${x:,.2f}"
+            )
+            view["breakeven"] = view["breakeven"].map(
+                lambda x: "—" if pd.isna(x) or x is None else f"${x:,.2f}"
+            )
+            view = view.rename(columns={
+                "bucket_label": "Term",
+                "trade_type": "Trade",
+                "spot": "Current Price",
+                "strike": "Strike",
+                "otm_pct": "% OTM",
+                "mid": "Premium",
+                "ivr": "IVR",
+                "max_profit": "Max Profit",
+                "breakeven": "Breakeven",
+                "annualized_yield": "Ann. Yield",
+                "why_ranked_high": "Why",
+            })
 
             count_label = f"{n} candidate{'s' if n != 1 else ''}"
             html_parts.append("<details class='ticker-block'>")

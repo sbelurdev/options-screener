@@ -1,14 +1,12 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import math
 from datetime import date
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
 from scipy.stats import norm
-
-from agent.utils.dates import is_third_friday
 
 
 def safe_float(value: Any, default: Optional[float] = None) -> Optional[float]:
@@ -77,77 +75,46 @@ def get_dte(expiration: date, today: date) -> int:
     return max((expiration - today).days, 0)
 
 
-def select_expiration_buckets(expirations: List[date], today: date, config: Dict[str, Any], logger) -> Dict[str, Dict[str, Any]]:
-    future = sorted([d for d in expirations if 0 < (d - today).days <= 45])  # exclude same-day; hard cap at 45 days
-
-    def _pick_in_range(min_d: int, max_d: int) -> Optional[date]:
-        candidates = [d for d in future if min_d <= (d - today).days <= max_d]
-        return min(candidates) if candidates else None
-
-    buckets: Dict[str, Dict[str, Any]] = {
-        "current_week": {"label": "Current Week", "expiration": None},
-        "next_week": {"label": "Next Week", "expiration": None},
-        "monthly": {"label": "Monthly", "expiration": None},
-    }
-
-    current = _pick_in_range(0, int(config["dte_current_week_max_days"]))
-    if current is None and future:
-        current = future[0]
-        buckets["current_week"]["label"] = "Current Week (fallback)"
-    buckets["current_week"]["expiration"] = current
-
-    next_week = _pick_in_range(int(config["dte_next_week_min_days"]), int(config["dte_next_week_max_days"]))
-    if next_week is None and future:
-        if current is not None:
-            later = [d for d in future if d > current]
-            if later:
-                next_week = later[0]
-        elif future:
-            next_week = future[0]
-        if next_week is not None:
-            buckets["next_week"]["label"] = "Next Week (fallback)"
-    # Prevent next_week duplicating current_week
-    if next_week is not None and next_week == current:
-        next_week = None
-    buckets["next_week"]["expiration"] = next_week
-
-    min_dte = int(config["monthly_target_dte_min"])
-    max_dte = int(config["monthly_target_dte_max"])
-    # Hard cap: never pick an expiration beyond max_dte days from today.
-    # Only consider third-Friday dates within the configured DTE range.
-    monthly_candidates = [
-        d for d in future
-        if is_third_friday(d) and min_dte <= (d - today).days <= max_dte
-    ]
-    if monthly_candidates:
-        monthly = monthly_candidates[0]
+def get_term_for_dte(dte: int) -> Tuple[str, str]:
+    """
+    Map a DTE value to a (bucket_name, bucket_label) term tuple.
+      0–14  DTE → Short-Term
+      15–28 DTE → Medium-Term
+      29+   DTE → Long-Term
+    """
+    if dte <= 14:
+        return "short_term", "Short-Term"
+    elif dte <= 28:
+        return "medium_term", "Medium-Term"
     else:
-        # Fallback: any expiry within the DTE window, closest to 4 weeks (28 days).
-        proxy = [d for d in future if min_dte <= (d - today).days <= max_dte]
-        if proxy:
-            monthly = min(proxy, key=lambda x: abs((x - today).days - 28))
-            buckets["monthly"]["label"] = "Monthly (proxy ~4wk)"
-        else:
-            # Nothing within the window — leave monthly empty rather than picking
-            # a LEAPS or far-future expiration.
-            monthly = None
-            logger.warning(
-                "No expiration found within %d–%d DTE for monthly bucket; skipping",
-                min_dte, max_dte,
-            )
-    # Prevent monthly duplicating current_week or next_week
-    if monthly is not None and monthly in (current, next_week):
-        monthly = None
-    buckets["monthly"]["expiration"] = monthly
+        return "long_term", "Long-Term"
 
-    for b_name, b in buckets.items():
-        exp = b.get("expiration")
-        if exp is not None:
-            logger.info("Bucket selected %s -> %s (%s)", b_name, exp.isoformat(), b.get("label"))
-        else:
-            logger.warning("Bucket selected %s -> none", b_name)
 
-    return buckets
+def select_expiration_dates(
+    expirations: List[date],
+    today: date,
+    max_dte: int = 45,
+) -> List[date]:
+    """
+    Select expiration dates to fetch option chains for:
+      - DTE <= 14:           ALL available expirations (captures daily / weekly options)
+      - 14 < DTE <= max_dte: Friday expirations only   (standard weekly / monthly)
+
+    Same-day expirations and anything beyond max_dte are excluded.
+    Returns a sorted, deduplicated list.
+    """
+    result: List[date] = []
+    for d in expirations:
+        dte = (d - today).days
+        if dte <= 0:
+            continue          # exclude same-day or past
+        if dte > max_dte:
+            continue          # hard cap
+        if dte <= 14:
+            result.append(d)  # all expirations within the short-term window
+        elif d.weekday() == 4:
+            result.append(d)  # Fridays only beyond 14 DTE
+    return sorted(set(result))
 
 
 def _passes_delta_or_otm(strategy: str, delta_value: Optional[float], otm_pct: Optional[float], config: Dict[str, Any]) -> bool:
@@ -315,6 +282,14 @@ def build_option_records(
 
         earnings_before_expiry = earnings_date is not None and earnings_date <= expiration and earnings_date >= today
 
+        # Max profit at expiry (per contract = 100 shares):
+        #   PUT  → keep full premium if stock stays above strike
+        #   CALL → premium + (strike − spot) upside if assigned at strike
+        if strategy == "PUT":
+            max_profit_val = round(mid * 100, 2)
+        else:
+            max_profit_val = round((strike - spot + mid) * 100, 2) if spot > 0 else None
+
         record = {
             "run_date": today.isoformat(),
             "ticker": ticker,
@@ -337,6 +312,7 @@ def build_option_records(
             "dte": dte,
             "annualized_yield": ann_yield,
             "breakeven": round(breakeven(strategy, strike, spot, mid), 4),
+            "max_profit": max_profit_val,
             "otm_pct": round(otm_pct, 6) if otm_pct is not None else None,
             "earnings_date": earnings_date.isoformat() if earnings_date else "",
             "earnings_before_expiry": earnings_before_expiry,
