@@ -358,12 +358,9 @@ def build_csp_recommendations(
         results.extend(recs)
 
     term_order = {"Short-Term": 0, "Medium-Term": 1, "Long-Term": 2}
-    verdict_order = {"Yes": 0, "Borderline": 1, "No": 2}
     results.sort(
         key=lambda r: (
-            r["ticker"],
             term_order.get(r.get("term", ""), 9),
-            verdict_order.get(r["recommend"], 3),
             -(float(r.get("annualized_yield") or 0)),
         )
     )

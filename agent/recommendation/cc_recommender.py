@@ -315,14 +315,11 @@ def build_cc_recommendations(
         )
         results.extend(recs)
 
-    # Sort: within each (ticker, term) group keep Yes before Borderline;
-    # across tickers sort by best verdict then annualized yield.
-    order = {"Yes": 0, "Borderline": 1, "No": 2}
+    term_order = {"Short-Term": 0, "Medium-Term": 1, "Long-Term": 2}
     results.sort(
         key=lambda r: (
             r["ticker"],
-            r["term"],
-            order.get(r["recommend"], 3),
+            term_order.get(r.get("term", ""), 9),
             -(float(r.get("annualized_yield") or 0)),
         )
     )

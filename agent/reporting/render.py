@@ -85,6 +85,7 @@ def _render_cc_recommendations(
         "<thead><tr>"
         "<th>Ticker</th>"
         "<th>Term</th>"
+        "<th>Ann. Yield</th>"
         "<th>Recommend</th>"
         "<th>Current Price</th>"
         "<th>Strike</th>"
@@ -96,7 +97,6 @@ def _render_cc_recommendations(
         "<th>IVR *</th>"
         "<th>Max Profit</th>"
         "<th>Breakeven</th>"
-        "<th>Ann. Yield</th>"
         "<th>Flags</th>"
         "<th>Why</th>"
         "</tr></thead><tbody>"
@@ -143,6 +143,7 @@ def _render_cc_recommendations(
             f"<tr>"
             f"<td><a href='{escape(fidelity_url)}' target='_blank' rel='noopener noreferrer'><strong>{escape(ticker)}</strong></a></td>"
             f"<td><strong>{escape(rec.get('term', ''))}</strong></td>"
+            f"<td>{escape(yield_display)}</td>"
             f"<td class='{css}'><strong>{escape(verdict)}</strong></td>"
             f"<td>{_fmt_money(spot_val)}</td>"
             f"<td>{_fmt_money(strike_val)}</td>"
@@ -154,7 +155,6 @@ def _render_cc_recommendations(
             f"<td>{escape(ivr_display)}</td>"
             f"<td>{_fmt_money(rec.get('max_profit'))}</td>"
             f"<td>{_fmt_money(rec.get('downside_breakeven'))}</td>"
-            f"<td>{escape(yield_display)}</td>"
             f"<td>{flags_html}</td>"
             f"<td class='reason-cell'>{escape(rec.get('reason', ''))}</td>"
             f"</tr>"
@@ -211,6 +211,7 @@ def _render_csp_recommendations(
         "<thead><tr>"
         "<th>Ticker</th>"
         "<th>Term</th>"
+        "<th>Ann. Yield</th>"
         "<th>Recommend</th>"
         "<th>Current Price</th>"
         "<th>Strike</th>"
@@ -223,7 +224,6 @@ def _render_csp_recommendations(
         "<th>Max Profit</th>"
         "<th>Breakeven</th>"
         "<th>Cash Req.</th>"
-        "<th>Ann. Yield</th>"
         "<th>Why</th>"
         "</tr></thead><tbody>"
     )
@@ -267,6 +267,7 @@ def _render_csp_recommendations(
             f"<tr>"
             f"<td><a href='{escape(fidelity_url)}' target='_blank' rel='noopener noreferrer'><strong>{escape(ticker)}</strong></a></td>"
             f"<td><strong>{escape(rec.get('term', ''))}</strong></td>"
+            f"<td>{escape(yield_display)}</td>"
             f"<td class='{css}'><strong>{escape(verdict)}</strong></td>"
             f"<td>{_fmt_money(spot_val)}</td>"
             f"<td>{_fmt_money(strike_val)}</td>"
@@ -279,7 +280,6 @@ def _render_csp_recommendations(
             f"<td>{_fmt_money(rec.get('max_profit'))}</td>"
             f"<td>{_fmt_money(rec.get('breakeven'))}</td>"
             f"<td>{_fmt_money(rec.get('cash_required'))}</td>"
-            f"<td>{escape(yield_display)}</td>"
             f"<td class='reason-cell'>{escape(reason_full)}</td>"
             f"</tr>"
         )
@@ -331,7 +331,6 @@ def write_reports(
     df.to_csv(csv_path, index=False)
 
     term_order_map = {"Short-Term": 0, "Medium-Term": 1, "Long-Term": 2}
-    trade_map = {"PUT": "SELL PUT", "CALL": "Covered CALL"}
 
     html_parts: List[str] = []
     html_parts.append("<!DOCTYPE html><html><head><meta charset='utf-8'>")
@@ -427,19 +426,20 @@ def write_reports(
             )
             n = len(tdf)
             tdf = tdf.copy()
-            tdf["trade_type"] = tdf["strategy"].map(trade_map).fillna(tdf["strategy"])
-            tdf["term_rank"] = tdf["bucket_label"].map(term_order_map).fillna(99)
-            tdf = tdf.sort_values(["term_rank", "score"], ascending=[True, False])
 
             # Ensure optional columns exist (may be absent if candidates came from an older run)
             for col in ("ivr", "max_profit"):
                 if col not in tdf.columns:
                     tdf[col] = None
 
+            tdf = tdf.sort_values(
+                ["expiration", "annualized_yield"], ascending=[True, False], na_position="last"
+            )
+
             view = tdf[[
-                "bucket_label", "trade_type", "spot", "strike", "otm_pct",
+                "bucket_label", "annualized_yield", "spot", "strike", "otm_pct",
                 "expiration", "dte", "mid", "delta", "ivr", "max_profit",
-                "breakeven", "annualized_yield", "why_ranked_high",
+                "breakeven", "why_ranked_high",
             ]].copy()
             view["annualized_yield"] = (view["annualized_yield"] * 100).map(
                 lambda x: f"{x:.2f}%" if pd.notna(x) else "—"
@@ -461,7 +461,7 @@ def write_reports(
             )
             view = view.rename(columns={
                 "bucket_label": "Term",
-                "trade_type": "Trade",
+                "annualized_yield": "Ann. Yield",
                 "spot": "Current Price",
                 "strike": "Strike",
                 "otm_pct": "% OTM",
@@ -469,7 +469,6 @@ def write_reports(
                 "ivr": "IVR",
                 "max_profit": "Max Profit",
                 "breakeven": "Breakeven",
-                "annualized_yield": "Ann. Yield",
                 "why_ranked_high": "Why",
             })
 
