@@ -424,13 +424,13 @@ def write_reports(
         )
         html_parts.append("</div>")
 
-    # ── CC Recommendations ─────────────────────────────────────────────────────
-    if cc_recommendations:
-        _render_cc_recommendations(cc_recommendations, html_parts)
-
     # ── CSP Recommendations ────────────────────────────────────────────────────
     if csp_recommendations:
         _render_csp_recommendations(csp_recommendations, html_parts)
+
+    # ── CC Recommendations ─────────────────────────────────────────────────────
+    if cc_recommendations:
+        _render_cc_recommendations(cc_recommendations, html_parts)
 
     # ── Screening results ──────────────────────────────────────────────────────
     if df.empty:
@@ -481,6 +481,8 @@ def write_reports(
                 "spot": "Current Price",
                 "strike": "Strike",
                 "otm_pct": "% OTM",
+                "expiration": "Expiration",
+                "dte": "DTE",
                 "mid": "Premium",
                 "ivr": "IVR",
                 "max_profit": "Max Profit",
