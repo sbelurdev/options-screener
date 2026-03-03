@@ -52,6 +52,102 @@ An educational options screener that analyses covered call (CC) and cash-secured
 
 ---
 
+## Pulled from Providers vs. Calculated Locally
+
+This is the single most important thing to understand about the data pipeline.
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│               PULLED FROM DATA PROVIDERS                            │
+├─────────────┬───────────────────────────────────────────────────────┤
+│ yfinance    │ Price history (OHLCV, 1y daily)                       │
+│             │ Options expiration dates                               │
+│             │ Options chain per expiration:                          │
+│             │   contractSymbol, strike, bid, ask, lastPrice,        │
+│             │   volume, openInterest, impliedVolatility              │
+│             │ ⚠ Delta is NOT provided by yfinance                   │
+│             │ Earnings date (calendar / earnings_dates endpoints)    │
+├─────────────┼───────────────────────────────────────────────────────┤
+│ Public.com  │ Options expiration dates                               │
+│ (primary    │ Options chain per expiration (same fields as above)    │
+│  if key set)│ Delta ← from dedicated greeks API endpoint            │
+│             │   (/option-details/{account_id}/greeks)               │
+│             │ Implied Volatility ← also from greeks endpoint        │
+│             │   (used as fallback if not in chain response)          │
+└─────────────┴───────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────┐
+│               CALCULATED LOCALLY (never from any provider)          │
+├──────────────────────────┬──────────────────────────────────────────┤
+│ Spot price               │ Last close from price history            │
+├──────────────────────────┼──────────────────────────────────────────┤
+│ MA20, MA50               │ Rolling mean of close prices             │
+│ RSI14                    │ Wilder's RSI on daily returns            │
+│ HV20                     │ 20-day annualised std-dev of returns     │
+├──────────────────────────┼──────────────────────────────────────────┤
+│ IVR / HV Rank            │ (current HV − hv_low) / (hv_high−hv_low)│
+│                          │ Uses 1-year HV series, never option IV   │
+├──────────────────────────┼──────────────────────────────────────────┤
+│ Delta (fallback only)    │ Black-Scholes when not from provider:    │
+│                          │   needs IV + risk_free_rate in config    │
+│                          │   → defaults to 0 if neither available  │
+├──────────────────────────┼──────────────────────────────────────────┤
+│ Annualized yield         │ (mid × 100) / collateral × (365 / DTE)  │
+│ Breakeven                │ strike − premium (PUT) / spot − premium  │
+│ OTM%                     │ (strike − spot) / spot                   │
+│ Bid-ask spread %         │ (ask − bid) / mid                        │
+├──────────────────────────┼──────────────────────────────────────────┤
+│ Support levels           │ low_52w, swing_low_20d from price history│
+│ Resistance levels        │ high_52w, swing_high_20d from price hist │
+├──────────────────────────┼──────────────────────────────────────────┤
+│ Candidate score [0–1]    │ Weighted: income + delta + trend +       │
+│                          │ liquidity; earnings penalty applied      │
+└──────────────────────────┴──────────────────────────────────────────┘
+```
+
+### Delta Source Priority Chain
+
+```
+For every option contract:
+
+  1. Public.com greeks API        ← most accurate (real-time greeks)
+       ↓ not available
+  2. yfinance chain delta column  ← yfinance rarely populates this
+       ↓ not available
+  3. Black-Scholes (local)        ← requires IV + risk_free_rate in config
+       d1 = (ln(S/K) + (r + σ²/2)t) / (σ√t)
+       CALL delta = N(d1);  PUT delta = N(d1) − 1
+       ↓ IV also missing
+  4. OTM% range check             ← delta-less fallback for filter only
+       ↓ fails range check
+  5. Default 0.0                  ← logged as warning; contract kept
+```
+
+### Implied Volatility Source (per contract)
+
+```
+  Public.com option-chain response  ← preferred
+       ↓ absent in response
+  Public.com greeks endpoint        ← fallback within Public
+       ↓ Public not available
+  yfinance impliedVolatility column ← always populated by yfinance
+```
+
+### What IVR Is — and Is Not
+
+IVR (shown in the report) is **not** a live IV Rank from a volatility data service. It is a locally-computed **HV Rank** proxy:
+
+```
+  HV series  = rolling 20-day annualised HV over the price history period (1y)
+  IVR proxy  = (today's HV − min HV over period) / (max HV − min HV) × 100
+
+  Option IV is shown alongside the HV rank for context but is NOT used
+  in the formula — option IV includes a risk premium above realised HV,
+  which would inflate the rank, especially for leveraged ETFs.
+```
+
+---
+
 ## Data Providers
 
 ### What Each Provider Returns
