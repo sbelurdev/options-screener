@@ -1,0 +1,16 @@
+covered_call_tickers:
+  - MSFT
+  - AAPL
+  - NVDA
+  - TQQQ
+
+cash_secured_put_tickers:
+  - TQQQ
+  - TECL
+  - NVDA
+  - AMD
+  - TSM
+
+output_dir: ./reports/prasanna
+log_dir: ./logs/prasanna
+cache_dir: ./cache/prasanna

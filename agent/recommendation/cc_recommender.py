@@ -11,8 +11,8 @@ At least one suggestion is always produced per term (even when no candidate
 perfectly meets the delta range criteria).
 
 Recommendation verdict per suggestion:
-  - Yes:        |delta| in [delta_min, delta_max], no earnings conflict, strike ≥ min_acceptable_price
-  - Borderline: delta outside target range, earnings too close, or strike below min_acceptable_price
+  - Yes: |delta| in [delta_min, delta_max], no earnings conflict, strike ≥ min_acceptable_price
+  - No:  delta outside target range, earnings too close, or strike below min_acceptable_price
   (IVR is shown for reference but does NOT affect the verdict.)
 
 A strike near a resistance level is flagged as a positive signal (stock may
@@ -119,7 +119,7 @@ def _recommend_for_bucket(
     """
     Return up to max_suggestions ranked suggestions for one term bucket.
     Always returns at least one row — even if no candidate perfectly meets
-    the delta range, the best available option is shown as Borderline.
+    the delta range, the best available option is still shown with a No verdict.
     IVR is computed for display only and does not affect the verdict.
     """
     spot = float(technicals.get("spot", 0))
@@ -188,7 +188,7 @@ def _recommend_for_bucket(
             issues.append(f"strike ${strike:.2f} below min ${min_acceptable_price:.2f}")
 
         if issues:
-            verdict = "Borderline"
+            verdict = "No"
             reason = "; ".join(issues)
         else:
             verdict = "Yes"
@@ -289,7 +289,7 @@ def build_cc_recommendations(
 ) -> List[Dict[str, Any]]:
     """
     Run CC recommendation engine for all covered-call tickers.
-    Returns list grouped by ticker/term, sorted Yes → Borderline within each group.
+    Returns list grouped by ticker/term with binary Yes/No verdicts.
     Capped at max_recommendations.
     """
     rec_config = config.get("cc_recommendation", {})

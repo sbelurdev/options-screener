@@ -1,0 +1,10 @@
+covered_call_tickers:
+  - MSFT
+  - AAPL
+
+cash_secured_put_tickers:
+  - TQQQ
+
+output_dir: ./reports/vatsa
+log_dir: ./logs/vatsa
+cache_dir: ./cache/vatsa

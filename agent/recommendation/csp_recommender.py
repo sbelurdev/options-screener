@@ -12,7 +12,7 @@ Recommendation logic — a CSP is recommended only when ALL of the following hol
   4. Delta of the strike is between delta_min and delta_max (default 0.10–0.25 abs)
 
 Criteria 1 and 3 are optional (use_support_filter, ivr_min can be set to 0 to skip).
-If IVR data is not derivable, the trade is flagged Borderline rather than rejected.
+If IVR data is not derivable, the trade is marked No with the reason preserved.
 
 Terms produced per ticker:
   - Short-Term:  DTE ≤ 14
@@ -260,7 +260,7 @@ def _recommend_csp_for_term(
         verdict = "No"
         reason = "; ".join(hard_fails)
     elif soft_fails:
-        verdict = "Borderline"
+        verdict = "No"
         reason = "; ".join(soft_fails)
     else:
         ivr_str = f"IVR {ivr_value:.0f}%" if ivr_value is not None else "IVR n/a"

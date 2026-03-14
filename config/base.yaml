@@ -1,0 +1,72 @@
+covered_call_tickers:
+  - MSFT
+  - AAPL
+  - NVDA
+  - TQQQ
+
+cash_secured_put_tickers:
+  - TQQQ
+  - TECL
+  - NVDA
+  - AMD
+  - TSM
+
+max_candidates_per_ticker_per_bucket: 5
+options_data_provider: public
+market_data_provider: yfinance
+fundamentals_provider: yfinance
+public_api_base_url: https://api.public.com
+public_api_key_env_var: PUBLIC_API_KEY
+public_access_token_validity_minutes: 15
+public_http_timeout_seconds: 20
+public_account_id: null
+public_underlying_instrument_type: EQUITY
+delta_put_min: -0.25
+delta_put_max: -0.1
+delta_call_min: 0.1
+delta_call_max: 0.25
+
+max_dte: 45
+short_term_max_dte: 14
+medium_term_max_dte: 28
+
+min_open_interest: null
+min_volume: null
+max_spread_pct: null
+html_min_mid_price: 0.5
+min_annualized_yield: 0.12
+risk_free_rate: 0.05
+
+put_otm_pct_min: 0.05
+put_otm_pct_max: 0.15
+call_otm_pct_min: 0.05
+call_otm_pct_max: 0.15
+
+earnings_risk_penalty: 0.20
+
+cc_recommendation:
+  enabled: true
+  max_recommendations: 50
+  max_suggestions_per_term: 3
+  earnings_buffer_days: 7
+  delta_min: 0.10
+  delta_max: 0.25
+  use_resistance_filter: true
+  resistance_pct_buffer: 0.02
+  min_acceptable_sale_prices: {}
+
+csp_recommendation:
+  enabled: true
+  max_recommendations: 30
+  ivr_min: 30.0
+  earnings_buffer_days: 7
+  delta_min: 0.10
+  delta_max: 0.25
+  use_support_filter: true
+  support_pct_buffer: 0.02
+
+output_dir: ./reports/shared
+log_dir: ./logs/shared
+cache_dir: ./cache/shared
+price_history_period: 1y
+price_history_interval: 1d

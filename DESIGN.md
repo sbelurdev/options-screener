@@ -11,7 +11,7 @@ An educational options screener that analyses covered call (CC) and cash-secured
 ```
 ┌───────────────────────────────────────────────────────────────┐
 │                         main.py                               │
-│   Parse CLI args → Load config.yaml → Setup logging          │
+│   Parse CLI args → Load config(s) / profile → Setup logging  │
 └───────────────────────────┬───────────────────────────────────┘
                             │ run_pipeline(config, logger)
                             ▼
@@ -377,12 +377,12 @@ Input: top-scored CALL candidates per ticker, split by DTE into 3 pools
        │    No earnings within 7d of expiry        │
        │    Strike ≥ min_acceptable_price           │
        ├───────────────────────────────────────────┤
-       │  Any issue above?            → BORDERLINE │
+       │  Any issue above?            → NO         │
        │    Shows reason (delta OOB, earnings,     │
        │    below min price)                       │
        └───────────────────────────────────────────┘
 
-    4. Always ≥1 suggestion per term, even if all Borderline
+    4. Always ≥1 suggestion per term, even if all are "No"
 
   IVR is computed and displayed (HV Rank proxy) but
   does NOT affect the CC verdict.
@@ -410,7 +410,7 @@ Input: top-scored PUT candidates per ticker, split by DTE into 3 pools
        │    Earnings within 7d of expiry            │
        │    No delta-qualified strike (0.10–0.25)   │
        ├───────────────────────────────────────────┤
-       │  Soft flags (→ BORDERLINE):               │
+       │  Soft flags (→ NO):                       │
        │    IVR unavailable / at 0% / at 100%      │
        │    Strike above support level              │
        ├───────────────────────────────────────────┤
@@ -435,40 +435,47 @@ Input: top-scored PUT candidates per ticker, split by DTE into 3 pools
   write_reports()  (render.py)
   ─────────────────────────────
   Outputs:
-    ./reports/{date}_options_report.csv   ← all candidate records
-    ./reports/{date}_options_report.html  ← interactive report
+    {output_dir}/{date}_options_report.csv   ← all candidate records
+    {output_dir}/{date}_options_report.html  ← interactive report
 
   HTML layout (top to bottom):
   ┌────────────────────────────────────────────────────┐
   │  ⚠ Provider fallback warning (if Public→yf used)   │
   ├────────────────────────────────────────────────────┤
-  │  [CC Recommendations table]                        │
-  │    Blue theme; 1 row per suggestion                │
-  │    Columns: Ticker | Term | Verdict | Spot |       │
+  │  Heading shows active profile when selected        │
+  │  Expand All / Collapse All controls                │
+  ├────────────────────────────────────────────────────┤
+  │  [Sell Call Recommendations]                       │
+  │    Blue theme; collapsed by default                │
+  │    Nested by term: Short Term / Medium Term /      │
+  │    Long Term                                       │
+  │    Columns: Ticker(color=yes/no) | AnnualYield |   │
+  │    Current | Strike | %OTM | Exp | DTE | Premium | │
+  │    Delta | IVR | MaxProfit | Breakeven | Flags |   │
+  │    Why                                             │
+  │    IVR displayed for reference only                │
+  ├────────────────────────────────────────────────────┤
+  │  [Sell Put Recommendations]                        │
+  │    Gold theme; collapsed by default                │
+  │    Nested by term: Short Term / Medium Term /      │
+  │    Long Term                                       │
+  │    Columns: Ticker(color=yes/no) | AnnualYield |   │
+  │    Current | Strike | %ToStrike | Exp | DTE |      │
+  │    Premium | Delta | IVR | MaxProfit | Breakeven | │
+  │    CashRqd | Why                                   │
+  ├────────────────────────────────────────────────────┤
+  │  [Sell Call Candidates] (collapsible, purple)      │
+  │    Nested by term: Short Term / Medium Term /      │
+  │    Long Term                                       │
+  │    Columns: Ticker | AnnualYield | Current |       │
   │    Strike | %OTM | Exp | DTE | Premium | Delta |   │
-  │    IVR★ | MaxProfit | Breakeven | AnnYield |       │
-  │    Flags | Why                                     │
-  │    ★ IVR displayed for reference only              │
+  │    IVR | MaxProfit | Breakeven | Why               │
   ├────────────────────────────────────────────────────┤
-  │  [CSP Recommendations table]                       │
-  │    Gold theme; 1 row per term per ticker           │
-  │    Columns: Ticker | Term | Verdict | Spot |       │
-  │    Strike | %ToStrike | Exp | DTE | Premium |      │
-  │    Delta | IVR★ | MaxProfit | Breakeven | CashReq │
-  │    AnnYield | Why                                  │
-  ├────────────────────────────────────────────────────┤
-  │  [Covered Calls screening] (collapsible, purple)   │
-  │    Per-ticker collapsible blocks                   │
-  │    Columns match rec table (minus Recommend/Term): │
-  │    Term | Trade | Spot | Strike | %OTM | Exp |    │
-  │    DTE | Premium | Delta | IVR | MaxProfit |       │
-  │    Breakeven | AnnYield | Why                      │
-  ├────────────────────────────────────────────────────┤
-  │  [Cash-Secured Puts screening] (collapsible, green)│
-  │    Same layout as Covered Calls above              │
+  │  [Sell Put Candidates] (collapsible, green)        │
+  │    Nested by term with same layout as above        │
   └────────────────────────────────────────────────────┘
 
-  Verdict colours:  ■ Yes = green   ■ Borderline = yellow   ■ No = red
+  Verdict colours:  ■ Yes = green   ■ No = red
   Links: each ticker links to Fidelity options research page
 ```
 
@@ -483,8 +490,8 @@ Input: top-scored PUT candidates per ticker, split by DTE into 3 pools
 | `delta_call_min/max` | 0.10 / 0.25 | Delta range for CALL screening filter |
 | `delta_put_min/max` | -0.25 / -0.10 | Delta range for PUT screening filter |
 | `max_dte` | 45 | Hard cap — expirations beyond this ignored |
-| `short_term_max_dte` | 14 | DTE ≤ 14 → Short-Term (all expirations) |
-| `medium_term_max_dte` | 28 | DTE ≤ 28 → Medium-Term (Fridays only) |
+| `short_term_max_dte` | 14 | DTE ≤ 14 → Short Term (all expirations) |
+| `medium_term_max_dte` | 28 | DTE ≤ 28 → Medium Term (Fridays only) |
 | `min_annualized_yield` | 12% | Contracts below this are dropped |
 | `earnings_risk_penalty` | 20% | Score reduction when earnings before expiry |
 | `risk_free_rate` | 5% | Used in Black-Scholes delta calculation |
@@ -502,7 +509,12 @@ Input: top-scored PUT candidates per ticker, split by DTE into 3 pools
 ```
 options-screener/
 ├── main.py                          ← CLI entry point
-├── config.yaml                      ← all user configuration
+├── config.yaml                      ← legacy single-file config fallback
+├── config/
+│   ├── base.yaml                    ← shared defaults
+│   └── users/
+│       ├── vatsa.yaml               ← profile overrides
+│       └── prasanna.yaml            ← profile overrides
 │
 ├── agent/
 │   ├── pipeline.py                  ← orchestrates the full run
