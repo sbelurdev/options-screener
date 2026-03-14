@@ -2,7 +2,7 @@
 
 ## Data Source Map (Hybrid)
 
-You can configure providers by role in `config.yaml`:
+You can configure providers by role in `config.yaml` or in profile-based config files under `config/`:
 
 - `options_data_provider`: `yfinance` or `public`
 - `market_data_provider`: `yfinance`
@@ -34,7 +34,7 @@ Or create a local `.env` file in the repo root (already gitignored):
 PUBLIC_API_KEY=your_public_secret_here
 ```
 
-Public-related config keys in `config.yaml`:
+Public-related config keys in config:
 
 - `public_api_base_url` (default `https://api.public.com`)
 - `public_api_key_env_var` (default `PUBLIC_API_KEY`)
@@ -67,7 +67,7 @@ Install dependencies and run:
 pip install -r requirements.txt
 ```
 
-Optional: run with explicit config file:
+Optional: run with explicit legacy config file:
 
 ```powershell
 # 2) Activate it - Every RUN
@@ -75,6 +75,67 @@ Optional: run with explicit config file:
 
 python main.py --config config.yaml
 ```
+
+Profile-based runs:
+
+```powershell
+python main.py --profile vatsa
+python main.py --profile prasanna
+```
+
+You can also set a default profile for your shell session:
+
+```powershell
+$env:OPTIONS_SCREENER_PROFILE="vatsa"
+python main.py
+```
+
+Profile loading order:
+
+- `DEFAULT_CONFIG` in code
+- `config/base.yaml`
+- `config/users/<profile>.yaml` when `--profile` or `OPTIONS_SCREENER_PROFILE` is set
+- `config.yaml` as a legacy fallback when no profile is selected
+- CLI overrides such as `--tickers` and `--output-dir`
+
+Each profile can keep its own:
+
+- ticker lists
+- screening thresholds such as delta ranges
+- recommendation settings
+- `output_dir`, `log_dir`, and `cache_dir`
+
+Current starter profiles:
+
+- `vatsa`
+- `prasanna`
+
+## Report UI
+
+The HTML report now includes:
+
+- a heading that shows the active profile, e.g. `Daily Options Screening Report (for vatsa)`
+- `Expand All` and `Collapse All` controls at the top
+- fully collapsed sections by default
+- recommendation sections organized as:
+  - top-level strategy section
+  - nested `Short Term`, `Medium Term`, and `Long Term` sections
+  - a table inside each term
+- candidate sections organized with the same term-first hierarchy
+
+Recommendation tables use ticker-cell color to encode verdict:
+
+- green ticker cell = `Yes`
+- red ticker cell = `No`
+
+Current recommendation/candidate column labels include names such as:
+
+- `AnnualYield`
+- `Current`
+- `%OTM`
+- `%ToStrike`
+- `MaxProfit`
+- `CashRqd`
 
 Provider smoke test (runs auth/account/expirations check, then exits):
 

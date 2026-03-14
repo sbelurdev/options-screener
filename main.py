@@ -1,8 +1,9 @@
 ﻿from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Iterable
 
 import yaml
 
@@ -17,6 +18,12 @@ def parse_args() -> argparse.Namespace:
         description="Educational options screener for cash-secured puts and covered calls."
     )
     parser.add_argument("--config", type=str, default=None, help="Path to config YAML")
+    parser.add_argument(
+        "--profile",
+        type=str,
+        default=None,
+        help="Named user profile from config/users/<profile>.yaml",
+    )
     parser.add_argument(
         "--tickers",
         type=str,
@@ -44,33 +51,65 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _deep_merge_dicts(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
+    merged = dict(base)
+    for key, value in override.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _deep_merge_dicts(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def _load_yaml_dict(path: Path) -> Dict[str, Any]:
+    with path.open("r", encoding="utf-8") as f:
+        loaded = yaml.safe_load(f) or {}
+    if not isinstance(loaded, dict):
+        raise ValueError(f"Config YAML must parse to a dictionary: {path}")
+    return loaded
+
+
+def _resolve_config_paths(args: argparse.Namespace) -> Iterable[Path]:
+    if args.config:
+        yield Path(args.config)
+        return
+
+    profile = (args.profile or os.getenv("OPTIONS_SCREENER_PROFILE") or "").strip().lower()
+    base_path = Path("config") / "base.yaml"
+    legacy_path = Path("config.yaml")
+
+    if profile:
+        if base_path.exists():
+            yield base_path
+        profile_path = Path("config") / "users" / f"{profile}.yaml"
+        if not profile_path.exists():
+            raise ValueError(f"Profile '{profile}' was not found at {profile_path}")
+        yield profile_path
+        return
+
+    if legacy_path.exists():
+        yield legacy_path
+        return
+
+    if base_path.exists():
+        yield base_path
+
+
 def load_config(args: argparse.Namespace) -> Dict[str, Any]:
     config = dict(DEFAULT_CONFIG)
-
-    config_path = None
-    if args.config:
-        config_path = Path(args.config)
-    else:
-        local_default = Path("config.yaml")
-        if local_default.exists():
-            config_path = local_default
-
-    if config_path:
-        with config_path.open("r", encoding="utf-8") as f:
-            loaded = yaml.safe_load(f) or {}
-            if not isinstance(loaded, dict):
-                raise ValueError("Config YAML must parse to a dictionary")
-            for key, value in loaded.items():
-                if isinstance(value, dict) and isinstance(config.get(key), dict):
-                    config[key] = {**config[key], **value}
-                else:
-                    config[key] = value
+    for config_path in _resolve_config_paths(args):
+        loaded = _load_yaml_dict(config_path)
+        config = _deep_merge_dicts(config, loaded)
 
     if args.tickers:
         tickers = [t.strip().upper() for t in args.tickers.split(",") if t.strip()]
         if tickers:
             config["covered_call_tickers"] = tickers
             config["cash_secured_put_tickers"] = tickers
+
+    profile = (args.profile or os.getenv("OPTIONS_SCREENER_PROFILE") or "").strip()
+    if profile:
+        config["active_profile"] = profile.lower()
 
     if args.output_dir:
         config["output_dir"] = args.output_dir

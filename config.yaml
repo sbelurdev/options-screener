@@ -50,7 +50,7 @@ cc_recommendation:
   enabled: true
   max_recommendations: 50       # Safety cap on total rows output
   max_suggestions_per_term: 3   # Top N suggestions per term (Short-Term / Monthly) per ticker
-  earnings_buffer_days: 7       # Flag as Borderline if earnings fall within N days of expiration
+  earnings_buffer_days: 7       # Mark as "No" if earnings fall within N days of expiration
   delta_min: 0.10               # |delta| lower bound for a "Yes" verdict
   delta_max: 0.25               # |delta| upper bound for a "Yes" verdict
   use_resistance_filter: true   # Flag strikes near resistance levels
