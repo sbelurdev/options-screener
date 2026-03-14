@@ -55,7 +55,9 @@ def _deep_merge_dicts(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[st
     merged = dict(base)
     for key, value in override.items():
         if isinstance(value, dict) and isinstance(merged.get(key), dict):
-            merged[key] = _deep_merge_dicts(merged[key], value)
+            # Treat an explicit empty map as a full override so profiles can
+            # clear inherited nested settings from base/default config files.
+            merged[key] = {} if not value else _deep_merge_dicts(merged[key], value)
         else:
             merged[key] = value
     return merged
@@ -108,7 +110,7 @@ def load_config(args: argparse.Namespace) -> Dict[str, Any]:
             config["cash_secured_put_tickers"] = tickers
 
     profile = (args.profile or os.getenv("OPTIONS_SCREENER_PROFILE") or "").strip()
-    if profile:
+    if profile and not args.config:
         config["active_profile"] = profile.lower()
 
     if args.output_dir:
