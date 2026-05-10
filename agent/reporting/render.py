@@ -88,6 +88,13 @@ _TERM_DISPLAY: Dict[str, str] = {
     "Long-Term":   "29–45 Days",
 }
 
+_SECTION_CONTROLS = (
+    "<div class='section-controls'>"
+    "<button type='button' onclick=\"this.closest('details').querySelectorAll('details').forEach(d=>d.open=true)\">Expand All</button>"
+    "<button type='button' onclick=\"this.closest('details').querySelectorAll('details').forEach(d=>d.open=false)\">Collapse All</button>"
+    "</div>"
+)
+
 
 def _display_term_label(term: str) -> str:
     return _TERM_DISPLAY.get(term, term)
@@ -200,6 +207,7 @@ def _render_cc_recommendations(recommendations: List[Dict[str, Any]], html_parts
         f"<span class='count'>{yes_count} Yes &nbsp;.&nbsp; {no_count} No &nbsp;.&nbsp; {total} total</span></summary>"
     )
     html_parts.append("<div class='cc-rec-body'>")
+    html_parts.append(_SECTION_CONTROLS)
 
     for term, term_recs in _term_groups(recs):
         _render_sell_call_term(term, term_recs, html_parts)
@@ -249,6 +257,7 @@ def _render_monthly_cc_recommendations(recommendations: List[Dict[str, Any]], ht
         "Use these to plan longer-duration covered call positions on shares you intend to hold."
         "</p>"
     )
+    html_parts.append(_SECTION_CONTROLS)
 
     for term, term_recs in _term_groups(recs):
         _render_sell_call_term(term, term_recs, html_parts)
@@ -378,6 +387,7 @@ def _render_csp_recommendations(recommendations: List[Dict[str, Any]], html_part
     )
 
     html_parts.append("<div class='rec-body'>")
+    html_parts.append(_SECTION_CONTROLS)
     for term, term_recs in _term_groups(recommendations):
         _render_sell_put_term(term, term_recs, html_parts)
 
@@ -409,6 +419,7 @@ def write_reports(
     disclaimer: str,
     csp_recommendations: Optional[List[Dict[str, Any]]] = None,
     cc_recommendations: Optional[List[Dict[str, Any]]] = None,
+    monthly_call_candidates: Optional[List[Dict[str, Any]]] = None,
     fallback_events: Optional[List[str]] = None,
 ) -> Tuple[str, str]:
     output_dir = Path(config["output_dir"])
@@ -447,6 +458,9 @@ def write_reports(
         ".report-controls{display:flex;gap:8px;margin:8px 0 14px;}"
         ".report-controls button{border:1px solid #d0d7de;background:#f6f8fa;color:#24292f;border-radius:6px;padding:6px 12px;font-size:12px;font-weight:600;cursor:pointer;}"
         ".report-controls button:hover{background:#eaeef2;}"
+        ".section-controls{display:flex;gap:6px;margin:0 0 8px;}"
+        ".section-controls button{border:1px solid #d0d7de;background:#f6f8fa;color:#24292f;border-radius:4px;padding:2px 8px;font-size:11px;font-weight:500;cursor:pointer;}"
+        ".section-controls button:hover{background:#eaeef2;}"
         "table{border-collapse:collapse;width:auto;margin:6px 0 6px 20px;}"
         "th,td{border:1px solid #d0d7de;padding:3px 6px;font-size:12px;text-align:left;white-space:nowrap;vertical-align:top;}"
         "th{background:#f6f8fa;font-weight:600;}"
@@ -458,6 +472,8 @@ def write_reports(
         ".section-puts>summary:hover{background:#166f30;}"
         ".section-calls>summary{background:#6639ba;}"
         ".section-calls>summary:hover{background:#5b33a8;}"
+        ".section-calls-monthly>summary{background:#3d1f8c;}"
+        ".section-calls-monthly>summary:hover{background:#32197a;}"
         ".section-rec>summary{background:#9a6700;color:#fff;font-size:17px;}"
         ".section-rec>summary:hover{background:#875d00;}"
         ".section-rec>summary::before{color:#fff;}"
@@ -642,10 +658,42 @@ def write_reports(
             count_label = f"{n} candidate{'s' if n != 1 else ''}"
             html_parts.append(f"<details class='section {css_class}'>")
             html_parts.append(f"<summary>{title}<span class='count'>({count_label})</span></summary>")
+            html_parts.append(_SECTION_CONTROLS)
             for term_label in ("Short-Term", "Medium-Term", "Long-Term"):
                 term_df = section_df[section_df["bucket_label"] == term_label]
                 if not term_df.empty:
                     render_candidate_term(term_df, term_label)
+            html_parts.append("</details>")
+
+        def render_monthly_call_section(monthly_candidates: List[Dict[str, Any]]) -> None:
+            if not monthly_candidates:
+                return
+            mdf = pd.DataFrame(monthly_candidates)
+            for col in ("ivr", "max_profit", "score", "why_ranked_high"):
+                if col not in mdf.columns:
+                    mdf[col] = None
+            mdf = mdf.sort_values(
+                ["ticker", "expiration", "annualized_yield"], ascending=[True, True, False], na_position="last"
+            )
+            n = len(mdf)
+            count_label = f"{n} candidate{'s' if n != 1 else ''}"
+            html_parts.append("<details class='section section-calls-monthly'>")
+            html_parts.append(
+                f"<summary>Monthly Sell Call Candidates — Beyond 45 Days"
+                f"<span class='count'>({count_label})</span></summary>"
+            )
+            html_parts.append(_SECTION_CONTROLS)
+            # Group by bucket_label (e.g. "Monthly - Jun 2026"), sorted chronologically
+            # by the earliest expiration in each group.
+            groups: Dict[str, pd.DataFrame] = {}
+            for label, gdf in mdf.groupby("bucket_label", sort=False):
+                groups[str(label)] = gdf
+            sorted_labels = sorted(
+                groups.keys(),
+                key=lambda lbl: groups[lbl]["expiration"].min()
+            )
+            for label in sorted_labels:
+                render_candidate_term(groups[label], label)
             html_parts.append("</details>")
 
         puts_df = df[df["strategy"] == "PUT"]
@@ -655,6 +703,7 @@ def write_reports(
             render_section(puts_df, "Sell Put Candidates", "section-puts")
         if not calls_df.empty:
             render_section(calls_df, "Sell Call Candidates", "section-calls")
+        render_monthly_call_section(monthly_call_candidates or [])
 
     html_parts.append("<hr>")
     html_parts.append(

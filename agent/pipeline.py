@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import date
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import pandas as pd
 
@@ -70,6 +70,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "resistance_pct_buffer": 0.02,
         "min_acceptable_sale_prices": {},
         "min_strike_prices": {},
+        "max_strike_prices": {},
+        "min_yield": 0.10,
         "long_term_months": 9,
     },
     "csp_recommendation": {
@@ -129,13 +131,26 @@ def _process_ticker(
 
     max_n = int(config["max_candidates_per_ticker_per_bucket"])
 
-    # Resolve per-ticker CC min strike once — used to pre-filter the raw chain
+    # Resolve per-ticker CC strike bounds once — pre-filter the raw chain
     # before any per-row computation (delta, BS, yield) to avoid wasted work.
-    _cc_min_strikes: Dict[str, Any] = config.get("cc_recommendation", {}).get("min_strike_prices") or {}
+    _cc_rec_cfg: Dict[str, Any] = config.get("cc_recommendation", {})
+    _cc_min_strikes: Dict[str, Any] = _cc_rec_cfg.get("min_strike_prices") or {}
     cc_min_strike = _cc_min_strikes.get(ticker) or _cc_min_strikes.get(ticker.upper())
     if cc_min_strike is not None:
         cc_min_strike = float(cc_min_strike)
-        logger.info("%s: CC min strike filter = %.2f (will pre-filter chain)", ticker, cc_min_strike)
+        logger.info("%s: CC min strike filter = %.2f", ticker, cc_min_strike)
+
+    _cc_max_strikes: Dict[str, Any] = _cc_rec_cfg.get("max_strike_prices") or {}
+    cc_max_strike = _cc_max_strikes.get(ticker) or _cc_max_strikes.get(ticker.upper())
+    if cc_max_strike is not None:
+        cc_max_strike = float(cc_max_strike)
+        logger.info("%s: CC max strike filter = %.2f", ticker, cc_max_strike)
+
+    cc_min_yield: Optional[float] = None
+    _raw_min_yield = _cc_rec_cfg.get("min_yield")
+    if _raw_min_yield is not None:
+        cc_min_yield = float(_raw_min_yield)
+        logger.info("%s: CC min yield filter = %.0f%%", ticker, cc_min_yield * 100)
 
     for expiry in selected_dates:
         dte_days = get_dte(expiry, date.today())
@@ -144,8 +159,13 @@ def _process_ticker(
         calls_df, puts_df = options_provider.get_options_chain(ticker, expiry)
 
         # Pre-filter the calls DataFrame before any per-row computation.
-        if cc_min_strike is not None and calls_df is not None and not calls_df.empty and "strike" in calls_df.columns:
-            calls_df = calls_df[calls_df["strike"].astype(float) >= cc_min_strike]
+        if calls_df is not None and not calls_df.empty and "strike" in calls_df.columns:
+            strikes = calls_df["strike"].astype(float)
+            if cc_min_strike is not None:
+                calls_df = calls_df[strikes >= cc_min_strike]
+                strikes = calls_df["strike"].astype(float)
+            if cc_max_strike is not None:
+                calls_df = calls_df[strikes <= cc_max_strike]
 
         put_candidates = (
             build_option_records(
@@ -184,6 +204,18 @@ def _process_ticker(
             else []
         )
 
+        # Post-filter: drop calls below the global min yield threshold.
+        if cc_min_yield is not None and call_candidates:
+            before = len(call_candidates)
+            call_candidates = [
+                c for c in call_candidates
+                if (c.get("annualized_yield") or 0) >= cc_min_yield
+            ]
+            dropped = before - len(call_candidates)
+            if dropped:
+                logger.info("%s expiry=%s: dropped %d calls below %.0f%% yield",
+                            ticker, expiry.isoformat(), dropped, cc_min_yield * 100)
+
         all_expiry = put_candidates + call_candidates
         for row in all_expiry:
             score, why = score_candidate(row, technicals, config)
@@ -217,8 +249,13 @@ def _process_ticker(
                     ", ".join(d.isoformat() for d in monthly_dates) or "none")
         for expiry in monthly_dates:
             calls_df, _ = options_provider.get_options_chain(ticker, expiry)
-            if cc_min_strike is not None and calls_df is not None and not calls_df.empty and "strike" in calls_df.columns:
-                calls_df = calls_df[calls_df["strike"].astype(float) >= cc_min_strike]
+            if calls_df is not None and not calls_df.empty and "strike" in calls_df.columns:
+                strikes = calls_df["strike"].astype(float)
+                if cc_min_strike is not None:
+                    calls_df = calls_df[strikes >= cc_min_strike]
+                    strikes = calls_df["strike"].astype(float)
+                if cc_max_strike is not None:
+                    calls_df = calls_df[strikes <= cc_max_strike]
             month_label = expiry.strftime("%b %Y")
             month_candidates = build_option_records(
                 ticker=ticker,
@@ -234,6 +271,15 @@ def _process_ticker(
                 logger=logger,
                 decision_logger=lambda row: options_provider.log_option_screen_result(ticker, row),
             )
+            if cc_min_yield is not None:
+                month_candidates = [
+                    c for c in month_candidates
+                    if (c.get("annualized_yield") or 0) >= cc_min_yield
+                ]
+            for row in month_candidates:
+                score, why = score_candidate(row, technicals, config)
+                row["score"] = round(score, 4)
+                row["why_ranked_high"] = why
             monthly_call_candidates.extend(month_candidates)
             logger.info("%s monthly expiry=%s candidates=%d", ticker, expiry.isoformat(), len(month_candidates))
     ticker_result["monthly_call_candidates"] = monthly_call_candidates
@@ -296,14 +342,20 @@ def run_pipeline(config: Dict[str, Any], logger) -> None:
     all_tickers = list(ticker_strategies.keys())
 
     all_candidates: List[Dict[str, Any]] = []
+    all_monthly_call_candidates: List[Dict[str, Any]] = []
     expiration_summary: Dict[str, List[date]] = {}
     ticker_results_map: Dict[str, Dict[str, Any]] = {}
 
-    logger.info(
-        "Providers selected options=%s market=%s fundamentals=%s",
-        str(config.get("options_data_provider", "yfinance")).lower(),
-        str(config.get("market_data_provider", "yfinance")).lower(),
-        str(config.get("fundamentals_provider", "yfinance")).lower(),
+    profile = str(config.get("active_profile") or "").strip()
+    profile_label = f"  Profile       : {profile}" if profile else ""
+    print(
+        f"\n{'=' * 52}\n"
+        f"  Options Screener  —  {date.today()}\n"
+        + (f"{profile_label}\n" if profile_label else "")
+        + f"  Covered Calls : {', '.join(cc_tickers) or '(none)'}\n"
+        f"  Cash-Sec Puts : {', '.join(csp_tickers) or '(none)'}\n"
+        f"  Provider      : {str(config.get('options_data_provider', 'yfinance')).lower()}\n"
+        f"{'=' * 52}\n"
     )
     logger.info("Starting options screener for tickers=%s", ",".join(all_tickers))
 
@@ -320,6 +372,7 @@ def run_pipeline(config: Dict[str, Any], logger) -> None:
             )
             expiration_summary[ticker] = result.get("selected_expirations", [])
             all_candidates.extend(result.get("candidates", []))
+            all_monthly_call_candidates.extend(result.get("monthly_call_candidates", []))
             ticker_results_map[ticker] = result
         except Exception as exc:
             logger.exception("Failed processing %s: %s", ticker, exc)
@@ -333,6 +386,7 @@ def run_pipeline(config: Dict[str, Any], logger) -> None:
         all_candidates, config, DISCLAIMER,
         csp_recommendations=csp_recommendations,
         cc_recommendations=cc_recommendations,
+        monthly_call_candidates=all_monthly_call_candidates,
         fallback_events=fallback_events,
     )
 

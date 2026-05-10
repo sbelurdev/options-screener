@@ -54,8 +54,10 @@ cc_recommendation:
   use_resistance_filter: true
   resistance_pct_buffer: 0.02
   min_acceptable_sale_prices: {}
-  min_strike_prices: {}  # optional per-ticker minimum strike filter, e.g. NVDA: 250
-  long_term_months: 9    # monthly expirations to fetch beyond max_dte (0 = disabled)
+  min_strike_prices: {}   # optional per-ticker minimum strike filter, e.g. NVDA: 250
+  max_strike_prices: {}   # optional per-ticker maximum strike filter, e.g. NVDA: 400
+  min_yield: 0.10         # minimum annualized yield — drop all call options below this threshold
+  long_term_months: 9     # monthly expirations to fetch beyond max_dte (0 = disabled)
 
 csp_recommendation:
   enabled: true

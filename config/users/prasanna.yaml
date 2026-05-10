@@ -1,15 +1,15 @@
 covered_call_tickers:
   - NVDA
-  - GOOGL 
 
 cc_recommendation:
   min_strike_prices:
-    NVDA: 250  # only show NVDA covered call strikes >= $250
-    GOOGL: 340 # only show GOOGL covered call strikes >= $340
+    NVDA: 230  # only show NVDA covered call strikes >= $230
+  max_strike_prices:
+    NVDA: 265  # only show NVDA covered call strikes <= $265
+  min_yield: 0.05  # drop all covered call options with annualized yield < 5%
 
 cash_secured_put_tickers:
   - TQQQ
-  - AMD
 
 output_dir: ./reports/prasanna
 log_dir: ./logs/prasanna
