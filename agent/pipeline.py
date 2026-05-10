@@ -18,6 +18,7 @@ from agent.signals.options_metrics import (
     get_dte,
     get_term_for_dte,
     select_expiration_dates,
+    select_monthly_cc_expiration_dates,
 )
 from agent.signals.technicals import compute_technicals
 
@@ -68,6 +69,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "use_resistance_filter": True,
         "resistance_pct_buffer": 0.02,
         "min_acceptable_sale_prices": {},
+        "min_strike_prices": {},
+        "long_term_months": 9,
     },
     "csp_recommendation": {
         "enabled": True,
@@ -126,11 +129,23 @@ def _process_ticker(
 
     max_n = int(config["max_candidates_per_ticker_per_bucket"])
 
+    # Resolve per-ticker CC min strike once — used to pre-filter the raw chain
+    # before any per-row computation (delta, BS, yield) to avoid wasted work.
+    _cc_min_strikes: Dict[str, Any] = config.get("cc_recommendation", {}).get("min_strike_prices") or {}
+    cc_min_strike = _cc_min_strikes.get(ticker) or _cc_min_strikes.get(ticker.upper())
+    if cc_min_strike is not None:
+        cc_min_strike = float(cc_min_strike)
+        logger.info("%s: CC min strike filter = %.2f (will pre-filter chain)", ticker, cc_min_strike)
+
     for expiry in selected_dates:
         dte_days = get_dte(expiry, date.today())
         bucket_name, bucket_label = get_term_for_dte(dte_days)
 
         calls_df, puts_df = options_provider.get_options_chain(ticker, expiry)
+
+        # Pre-filter the calls DataFrame before any per-row computation.
+        if cc_min_strike is not None and calls_df is not None and not calls_df.empty and "strike" in calls_df.columns:
+            calls_df = calls_df[calls_df["strike"].astype(float) >= cc_min_strike]
 
         put_candidates = (
             build_option_records(
@@ -189,6 +204,39 @@ def _process_ticker(
             len(top_puts),
             len(top_calls),
         )
+
+    # Fetch monthly CALL chains beyond max_dte for long-term CC analysis.
+    # Stored separately so they don't pollute the short/medium/long detail tables.
+    long_term_months = int(config.get("cc_recommendation", {}).get("long_term_months", 0))
+    monthly_call_candidates: List[Dict[str, Any]] = []
+    if "CALL" in strategies and long_term_months > 0:
+        monthly_dates = select_monthly_cc_expiration_dates(
+            expirations, date.today(), max_dte, long_term_months
+        )
+        logger.info("%s: monthly CC expirations (%d months): %s", ticker, long_term_months,
+                    ", ".join(d.isoformat() for d in monthly_dates) or "none")
+        for expiry in monthly_dates:
+            calls_df, _ = options_provider.get_options_chain(ticker, expiry)
+            if cc_min_strike is not None and calls_df is not None and not calls_df.empty and "strike" in calls_df.columns:
+                calls_df = calls_df[calls_df["strike"].astype(float) >= cc_min_strike]
+            month_label = expiry.strftime("%b %Y")
+            month_candidates = build_option_records(
+                ticker=ticker,
+                strategy="CALL",
+                options_df=calls_df,
+                expiration=expiry,
+                bucket_name="monthly",
+                bucket_label=f"Monthly - {month_label}",
+                spot=spot,
+                technicals=technicals,
+                earnings_date=earnings_date,
+                config=config,
+                logger=logger,
+                decision_logger=lambda row: options_provider.log_option_screen_result(ticker, row),
+            )
+            monthly_call_candidates.extend(month_candidates)
+            logger.info("%s monthly expiry=%s candidates=%d", ticker, expiry.isoformat(), len(month_candidates))
+    ticker_result["monthly_call_candidates"] = monthly_call_candidates
 
     # Attach ticker-level IVR (HV Rank) to every candidate for the detail table
     ticker_ivr, ticker_ivr_source = compute_ivr_proxy(hist, None)

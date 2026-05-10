@@ -223,6 +223,122 @@ def _recommend_for_bucket(
     return results
 
 
+# ── Monthly long-term recommendation ────────────────────────────────────────
+
+def _recommend_monthly_cc(
+    ticker: str,
+    monthly_call_candidates: List[Dict[str, Any]],
+    price_df: pd.DataFrame,
+    technicals: Dict[str, float],
+    earnings_date: Optional[date],
+    min_acceptable_price: Optional[float],
+    rec_config: Dict[str, Any],
+) -> List[Dict[str, Any]]:
+    """
+    For each monthly expiration beyond max_dte, pick the single best CALL by
+    annualized yield.  Returns one row per expiration month, sorted by date.
+    The verdict logic mirrors _recommend_for_bucket but yield is the primary
+    selection criterion, not score.
+    """
+    if not monthly_call_candidates:
+        return []
+
+    spot = float(technicals.get("spot", 0))
+    delta_min = float(rec_config.get("delta_min", 0.10))
+    delta_max = float(rec_config.get("delta_max", 0.25))
+    earnings_buffer = int(rec_config.get("earnings_buffer_days", 7))
+    resistance_buffer = float(rec_config.get("resistance_pct_buffer", 0.02))
+    resistance = get_resistance_levels(price_df)
+
+    # Group by expiration date
+    by_expiry: Dict[str, List[Dict[str, Any]]] = {}
+    for c in monthly_call_candidates:
+        by_expiry.setdefault(str(c.get("expiration", "")), []).append(c)
+
+    results: List[Dict[str, Any]] = []
+    for exp_str in sorted(by_expiry.keys()):
+        pool = by_expiry[exp_str]
+        # Primary sort: annualized yield descending
+        best = max(pool, key=lambda c: float(c.get("annualized_yield") or 0))
+
+        strike = float(best["strike"])
+        premium = float(best.get("mid", 0))
+        delta_val = best.get("delta")
+        dte_val = best.get("dte")
+        ann_yield = best.get("annualized_yield")
+
+        try:
+            exp_date = date.fromisoformat(exp_str)
+            term_label = f"Monthly ({exp_date.strftime('%b %Y')})"
+        except ValueError:
+            term_label = f"Monthly ({exp_str})"
+
+        near_round = _near_round_number(strike)
+        near_res = _near_resistance(strike, resistance, resistance_buffer)
+        below_min = min_acceptable_price is not None and strike < min_acceptable_price
+
+        delta_in_range = delta_val is not None and delta_min <= abs(float(delta_val)) <= delta_max
+
+        earnings_ok = True
+        if earnings_date is not None and exp_str:
+            try:
+                c_exp = date.fromisoformat(exp_str)
+                days_before = (c_exp - earnings_date).days
+                earnings_ok = not (earnings_date <= c_exp and days_before <= earnings_buffer)
+            except ValueError:
+                pass
+
+        best_iv = float(best["implied_volatility"]) if best.get("implied_volatility") else None
+        ivr_value, ivr_source = compute_ivr_proxy(price_df, best_iv)
+
+        issues: List[str] = []
+        if not delta_in_range:
+            d = abs(float(delta_val)) if delta_val is not None else None
+            if d is not None:
+                issues.append(f"delta {d:.2f} outside {delta_min:.2f}–{delta_max:.2f}")
+            else:
+                issues.append("delta unavailable")
+        if not earnings_ok:
+            issues.append("earnings too close to expiration")
+        if below_min:
+            issues.append(f"strike ${strike:.2f} below min ${min_acceptable_price:.2f}")
+
+        if issues:
+            verdict = "No"
+            reason = "; ".join(issues)
+        else:
+            verdict = "Yes"
+            d_str = f"{abs(float(delta_val)):.2f}" if delta_val is not None else "n/a"
+            reason = f"delta {d_str}; best annualized yield for month"
+            if near_res:
+                reason += "; near resistance (favourable)"
+
+        max_profit = round((strike - spot + premium) * 100, 2) if spot > 0 else None
+        downside_breakeven = round(spot - premium, 2) if spot > 0 else None
+
+        row = _make_base_row(ticker, term_label, spot, min_acceptable_price)
+        row.update({
+            "recommend": verdict,
+            "reason": reason,
+            "strike": strike,
+            "expiration": exp_str,
+            "premium": round(premium, 2),
+            "delta": round(float(delta_val), 3) if delta_val is not None else None,
+            "ivr": ivr_value,
+            "ivr_source": ivr_source,
+            "max_profit": max_profit,
+            "downside_breakeven": downside_breakeven,
+            "near_resistance": near_res,
+            "near_round_number": near_round,
+            "below_min_price": below_min,
+            "dte": dte_val,
+            "annualized_yield": ann_yield,
+        })
+        results.append(row)
+
+    return results
+
+
 # ── Per-ticker entry point ──────────────────────────────────────────────────
 
 def recommend_cc_for_ticker(
@@ -233,10 +349,12 @@ def recommend_cc_for_ticker(
     earnings_date: Optional[date],
     min_acceptable_price: Optional[float],
     rec_config: Dict[str, Any],
+    monthly_call_candidates: Optional[List[Dict[str, Any]]] = None,
 ) -> List[Dict[str, Any]]:
     """
-    Produce CC suggestions (Short-Term / Medium-Term / Long-Term) for one ticker.
+    Produce CC suggestions (Short-Term / Medium-Term / Long-Term + Monthly) for one ticker.
     Returns a flat list of suggestion dicts, ≥1 per term.
+    Monthly entries are ranked by annualized yield; one per expiration month.
     """
     spot = float(technicals.get("spot", 0))
     if spot <= 0:
@@ -277,6 +395,20 @@ def recommend_cc_for_ticker(
                 max_suggestions=max_suggestions,
             )
         )
+
+    if monthly_call_candidates:
+        results.extend(
+            _recommend_monthly_cc(
+                ticker=ticker,
+                monthly_call_candidates=monthly_call_candidates,
+                price_df=price_df,
+                technicals=technicals,
+                earnings_date=earnings_date,
+                min_acceptable_price=min_acceptable_price,
+                rec_config=rec_config,
+            )
+        )
+
     return results
 
 
@@ -312,6 +444,7 @@ def build_cc_recommendations(
             earnings_date=tr.get("earnings_date"),
             min_acceptable_price=min_price,
             rec_config=rec_config,
+            monthly_call_candidates=tr.get("monthly_call_candidates", []),
         )
         results.extend(recs)
 

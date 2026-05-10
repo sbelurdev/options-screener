@@ -66,11 +66,31 @@ def _term_groups(recommendations: List[Dict[str, Any]]) -> List[Tuple[str, List[
     for rec in recommendations:
         term = rec.get("term") or "Other"
         grouped.setdefault(term, []).append(rec)
-    return sorted(grouped.items(), key=lambda item: term_order.get(item[0], 99))
+
+    def _sort_key(item: Tuple[str, List[Dict[str, Any]]]) -> tuple:
+        term = item[0]
+        base = term_order.get(term)
+        if base is not None:
+            return (base, "")
+        # Monthly terms: sort by the expiration of the first entry so they appear
+        # in chronological order after Long-Term.
+        if term.startswith("Monthly"):
+            first_exp = item[1][0].get("expiration", "9999-99-99")
+            return (3, str(first_exp))
+        return (99, term)
+
+    return sorted(grouped.items(), key=_sort_key)
+
+
+_TERM_DISPLAY: Dict[str, str] = {
+    "Short-Term":  "0–14 Days",
+    "Medium-Term": "15–28 Days",
+    "Long-Term":   "29–45 Days",
+}
 
 
 def _display_term_label(term: str) -> str:
-    return term.replace("-", " ")
+    return _TERM_DISPLAY.get(term, term)
 
 
 def _render_sell_call_term(term: str, recommendations: List[Dict[str, Any]], html_parts: List[str]) -> None:
@@ -164,25 +184,27 @@ def _render_sell_call_term(term: str, recommendations: List[Dict[str, Any]], htm
 
 
 def _render_cc_recommendations(recommendations: List[Dict[str, Any]], html_parts: List[str]) -> None:
-    """Render the sell call recommendation table."""
-    if not recommendations:
+    """Render the sell call recommendation table (0–45 day buckets only)."""
+    # Monthly entries have their own dedicated section
+    recs = [r for r in recommendations if not (r.get("term") or "").startswith("Monthly")]
+    if not recs:
         return
 
-    yes_count = sum(1 for r in recommendations if r["recommend"] == "Yes")
-    no_count = sum(1 for r in recommendations if r["recommend"] == "No")
-    total = len(recommendations)
+    yes_count = sum(1 for r in recs if r["recommend"] == "Yes")
+    no_count = sum(1 for r in recs if r["recommend"] == "No")
+    total = len(recs)
 
     html_parts.append("<details class='section section-cc-rec'>")
     html_parts.append(
-        f"<summary>Sell Call Recommendations"
+        f"<summary>Sell Call Recommendations (0–45 Days)"
         f"<span class='count'>{yes_count} Yes &nbsp;.&nbsp; {no_count} No &nbsp;.&nbsp; {total} total</span></summary>"
     )
     html_parts.append("<div class='cc-rec-body'>")
 
-    for term, term_recs in _term_groups(recommendations):
+    for term, term_recs in _term_groups(recs):
         _render_sell_call_term(term, term_recs, html_parts)
 
-    has_proxy = any("proxy" in (r.get("ivr_source") or "") for r in recommendations)
+    has_proxy = any("proxy" in (r.get("ivr_source") or "") for r in recs)
     if has_proxy:
         html_parts.append(
             "<p class='rec-footnote'>IVR shown for reference only - it does <strong>not</strong> affect the "
@@ -197,6 +219,54 @@ def _render_cc_recommendations(recommendations: List[Dict[str, Any]], html_parts
         "<li>Close the position at <strong>70% of max profit</strong> - capture most of the premium early.</li>"
         "<li>Close or roll up/out if the stock rallies and unrealised loss reaches <strong>2&times; the premium received</strong>.</li>"
         "<li>Roll to a <strong>higher strike or later expiration</strong> if assignment is imminent and you want to retain the shares.</li>"
+        "</ul>"
+        "</div>"
+    )
+
+    html_parts.append("</div>")
+    html_parts.append("</details>")
+
+
+def _render_monthly_cc_recommendations(recommendations: List[Dict[str, Any]], html_parts: List[str]) -> None:
+    """Render monthly covered call recommendations (beyond 45 days) in a dedicated section."""
+    recs = [r for r in recommendations if (r.get("term") or "").startswith("Monthly")]
+    if not recs:
+        return
+
+    yes_count = sum(1 for r in recs if r["recommend"] == "Yes")
+    no_count = sum(1 for r in recs if r["recommend"] == "No")
+    total = len(recs)
+
+    html_parts.append("<details class='section section-cc-monthly'>")
+    html_parts.append(
+        f"<summary>Monthly Covered Call Opportunities — Beyond 45 Days"
+        f"<span class='count'>{yes_count} Yes &nbsp;.&nbsp; {no_count} No &nbsp;.&nbsp; {total} total</span></summary>"
+    )
+    html_parts.append("<div class='cc-rec-body'>")
+    html_parts.append(
+        "<p class='rec-footnote' style='margin-bottom:8px;'>"
+        "One best-yield call per expiration month, ranked by annualized yield. "
+        "Use these to plan longer-duration covered call positions on shares you intend to hold."
+        "</p>"
+    )
+
+    for term, term_recs in _term_groups(recs):
+        _render_sell_call_term(term, term_recs, html_parts)
+
+    has_proxy = any("proxy" in (r.get("ivr_source") or "") for r in recs)
+    if has_proxy:
+        html_parts.append(
+            "<p class='rec-footnote'>IVR shown for reference only. Computed as HV Rank "
+            "(current 20-day HV vs 1-year HV range).</p>"
+        )
+
+    html_parts.append(
+        "<div class='exit-rules'>"
+        "<strong>Exit Rules (Monthly Covered Calls):</strong>"
+        "<ul>"
+        "<li>Consider closing or rolling at <strong>50% of max profit</strong> — longer DTE captures more time value early.</li>"
+        "<li>Roll to a higher strike or further month if the stock rallies above your strike.</li>"
+        "<li>Review monthly — premium decay accelerates in the last 30 days.</li>"
         "</ul>"
         "</div>"
     )
@@ -409,6 +479,9 @@ def write_reports(
         ".section-cc-rec>summary{background:#0d6efd;color:#fff;font-size:17px;}"
         ".section-cc-rec>summary:hover{background:#0b5ed7;}"
         ".section-cc-rec>summary::before{color:#fff;}"
+        ".section-cc-monthly>summary{background:#0a6640;color:#fff;font-size:17px;}"
+        ".section-cc-monthly>summary:hover{background:#085534;}"
+        ".section-cc-monthly>summary::before{color:#fff;}"
         ".cc-rec-body{padding:8px 12px 12px;}"
         ".cc-rec-table{margin:0 0 10px 0;width:100%;}"
         ".cc-rec-table th{background:#dbeafe;font-size:12px;}"
@@ -445,6 +518,7 @@ def write_reports(
 
     if cc_recommendations:
         _render_cc_recommendations(cc_recommendations, html_parts)
+        _render_monthly_cc_recommendations(cc_recommendations, html_parts)
 
     if df.empty:
         html_parts.append("<p>No candidates passed filters today.</p>")

@@ -1,15 +1,15 @@
 covered_call_tickers:
-  - MSFT
-  - AAPL
   - NVDA
-  - TQQQ
+  - GOOGL 
+
+cc_recommendation:
+  min_strike_prices:
+    NVDA: 250  # only show NVDA covered call strikes >= $250
+    GOOGL: 340 # only show GOOGL covered call strikes >= $340
 
 cash_secured_put_tickers:
   - TQQQ
-  - TECL
-  - NVDA
   - AMD
-  - TSM
 
 output_dir: ./reports/prasanna
 log_dir: ./logs/prasanna

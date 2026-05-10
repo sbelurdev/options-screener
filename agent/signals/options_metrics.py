@@ -90,6 +90,34 @@ def get_term_for_dte(dte: int) -> Tuple[str, str]:
         return "long_term", "Long-Term"
 
 
+def select_monthly_cc_expiration_dates(
+    expirations: List[date],
+    today: date,
+    min_dte: int,
+    max_months: int,
+) -> List[date]:
+    """
+    Select one Friday expiration per calendar month for long-term covered call analysis.
+    Starts from the first Friday expiration strictly beyond min_dte days out, and covers
+    up to max_months calendar months from today.  Returns a sorted list with at most one
+    entry per (year, month) pair.
+    """
+    result: List[date] = []
+    seen_months: set = set()
+    for d in sorted(expirations):
+        dte = (d - today).days
+        if dte <= min_dte:
+            continue
+        months_ahead = (d.year - today.year) * 12 + (d.month - today.month)
+        if months_ahead > max_months:
+            break
+        month_key = (d.year, d.month)
+        if month_key not in seen_months and d.weekday() == 4:  # Fridays only
+            seen_months.add(month_key)
+            result.append(d)
+    return result
+
+
 def select_expiration_dates(
     expirations: List[date],
     today: date,

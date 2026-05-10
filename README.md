@@ -17,21 +17,20 @@ Current source ownership:
 | Earnings | `earnings_date`, `earnings_before_expiry` | `fundamentals_provider` |
 | Derived metrics (local) | `mid`, `spread_pct`, `dte`, `annualized_yield`, `breakeven`, `otm_pct`, `score`, `why_ranked_high` | Computed in app |
 
-## Public.com API Setup (Options Provider)
 
+## Public.com API Setup (Options Provider)
 To use Public for options data (`options_data_provider: public`), set your API key in an environment variable.
 
+# Option 1
+Create a local `.env` file in the repo root (already gitignored):
+```dotenv
+PUBLIC_API_KEY=your_public_secret_here
+```
+# Option 2
 PowerShell (current session):
-
 ```powershell
 $env:PUBLIC_API_KEY="your_public_secret_here"
 python main.py
-```
-
-Or create a local `.env` file in the repo root (already gitignored):
-
-```dotenv
-PUBLIC_API_KEY=your_public_secret_here
 ```
 
 Public-related config keys in config:
@@ -46,7 +45,7 @@ Public-related config keys in config:
 ## Run in a Python virtual environment (PowerShell)
 
 From the project root (`c:\Users\sbelu\OneDrive\Documents\Git\options-screener`):
-From the project root (`c:\Users\prasa\OneDrive\Documents\Git\options-screener`):
+From the project root (`C:\Users\prasa\OneDrive\AI\options-screener`):
 
 ```powershell 
 # 1) Create venv (first time only) -- ONE TIME
