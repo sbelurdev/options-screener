@@ -141,3 +141,33 @@ Provider smoke test (runs auth/account/expirations check, then exits):
 ```powershell
 python main.py --provider-smoke-test --smoke-ticker SPY
 ```
+
+## Auto-Run Schedule
+
+The Streamlit dashboard can run the pipeline automatically at configured times. Default schedule (set in `config/base.yaml`, overridable per profile):
+
+```yaml
+schedule:
+  enabled: true
+  times:
+    - "07:45"
+    - "12:00"
+```
+
+Times are in 24-hour format. Edit them in the UI via **Configure → Settings → Auto-Run Schedule**, then click **Save to Profile** to persist.
+
+**Limitation: schedule requires the browser tab to be open.**
+The auto-run is powered by Streamlit's `@st.fragment(run_every=30)`, which polls every 30 seconds. If the browser tab is closed or the Streamlit server is not running, no scheduled run will fire.
+
+For headless / cron-style scheduling that runs regardless of the UI, use your OS scheduler instead:
+
+```powershell
+# Windows Task Scheduler or PowerShell — runs the pipeline directly
+.\.venv\Scripts\python.exe main.py --profile prasanna
+```
+
+```bash
+# Linux/macOS cron (crontab -e)
+45 7  * * 1-5  /path/to/.venv/bin/python /path/to/main.py --profile prasanna
+0  12 * * 1-5  /path/to/.venv/bin/python /path/to/main.py --profile prasanna
+```

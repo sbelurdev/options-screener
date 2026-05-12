@@ -2,6 +2,8 @@
 
 import argparse
 import os
+import subprocess
+import sys
 from pathlib import Path
 from typing import Any, Dict, Iterable
 
@@ -47,6 +49,11 @@ def parse_args() -> argparse.Namespace:
         type=str,
         default=None,
         help="Ticker symbol to use for --provider-smoke-test",
+    )
+    parser.add_argument(
+        "--headless",
+        action="store_true",
+        help="Run pipeline without launching the UI (for scripted/automated use)",
     )
     return parser.parse_args()
 
@@ -127,6 +134,22 @@ def main() -> None:
     load_dotenv_if_present(".env")
     load_dotenv_if_present(str(Path(__file__).resolve().parent / ".env"))
     args = parse_args()
+
+    if not args.headless and not args.provider_smoke_test:
+        try:
+            import importlib
+            importlib.import_module("streamlit")
+        except ImportError:
+            print("ERROR: streamlit is not installed for this Python.")
+            print(f"  Run: {sys.executable} -m pip install streamlit")
+            sys.exit(1)
+        app_path = str(Path(__file__).resolve().parent / "app.py")
+        result = subprocess.run(
+            [sys.executable, "-m", "streamlit", "run", app_path,
+             "--browser.gatherUsageStats=false"],
+        )
+        sys.exit(result.returncode)
+
     config = load_config(args)
     logger = setup_logging(config)
 

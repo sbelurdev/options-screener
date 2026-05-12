@@ -67,8 +67,8 @@ def annualized_yield(strategy: str, credit: float, strike: float, spot: float, d
 
 def breakeven(strategy: str, strike: float, spot: float, credit: float) -> float:
     if strategy == "PUT":
-        return strike - credit
-    return spot - credit
+        return strike - credit   # stock can fall to here before net loss
+    return strike + credit       # stock must rise above here for the call buyer to profit
 
 
 def get_dte(expiration: date, today: date) -> int:

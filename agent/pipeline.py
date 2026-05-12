@@ -390,6 +390,15 @@ def run_pipeline(config: Dict[str, Any], logger) -> None:
         fallback_events=fallback_events,
     )
 
+    run_day = date.today().isoformat()
+    _out = Path(config["output_dir"])
+    if cc_recommendations:
+        pd.DataFrame(cc_recommendations).to_csv(_out / f"{run_day}_cc_recs.csv", index=False)
+    if csp_recommendations:
+        pd.DataFrame(csp_recommendations).to_csv(_out / f"{run_day}_csp_recs.csv", index=False)
+    if all_monthly_call_candidates:
+        pd.DataFrame(all_monthly_call_candidates).to_csv(_out / f"{run_day}_monthly_calls.csv", index=False)
+
     print("=" * 72)
     print("Options Screener Summary")
     print("=" * 72)

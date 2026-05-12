@@ -104,11 +104,76 @@ class _FallbackOptionsProvider(OptionsChainProvider):
         self._primary.log_option_screen_result(ticker, row)
 
 
+class _ExtendedWithFallbackProvider(OptionsChainProvider):
+    """yfinance as primary, public.com as secondary for expirations/chains not in yfinance.
+
+    Expiration list = union of both providers so monthly chains listed only in public are
+    included. Chain fetches try yfinance first; if yfinance returns nothing for a given
+    expiration, public is tried as fallback.
+    """
+
+    def __init__(self, primary: YFinanceProvider, secondary: PublicOptionsProvider, logger) -> None:
+        self._primary = primary
+        self._secondary = secondary
+        self._logger = logger
+        self.fallback_events: List[str] = []
+
+    def get_options_expirations(self, ticker: str) -> List[date]:
+        primary_dates: set[date] = set()
+        secondary_dates: set[date] = set()
+        try:
+            primary_dates = set(self._primary.get_options_expirations(ticker))
+        except Exception as exc:
+            self._logger.warning("%s: yfinance expirations failed: %s", ticker, exc)
+        try:
+            secondary_dates = set(self._secondary.get_options_expirations(ticker))
+        except Exception as exc:
+            self._logger.warning("%s: public expirations failed (best-effort): %s", ticker, exc)
+        extra = secondary_dates - primary_dates
+        if extra:
+            self._logger.info(
+                "%s: %d extra expiration(s) from public.com not in yfinance: %s",
+                ticker, len(extra), ", ".join(d.isoformat() for d in sorted(extra)),
+            )
+        return sorted(primary_dates | secondary_dates)
+
+    def get_options_chain(self, ticker: str, expiration: date) -> Tuple[pd.DataFrame, pd.DataFrame]:
+        try:
+            calls, puts = self._primary.get_options_chain(ticker, expiration)
+            if not (calls.empty and puts.empty):
+                return calls, puts
+        except Exception as exc:
+            self._logger.warning("%s %s: yfinance chain failed: %s", ticker, expiration.isoformat(), exc)
+
+        msg = f"{ticker}: {expiration.isoformat()} not in yfinance — fetching from public.com"
+        self._logger.info(msg)
+        self.fallback_events.append(msg)
+        try:
+            return self._secondary.get_options_chain(ticker, expiration)
+        except Exception as exc:
+            self._logger.warning("%s %s: public chain also failed: %s", ticker, expiration.isoformat(), exc)
+            return pd.DataFrame(), pd.DataFrame()
+
+    def log_option_screen_result(self, ticker: str, row: dict) -> None:
+        self._primary.log_option_screen_result(ticker, row)
+
+
 def build_options_provider(config: Dict[str, Any], logger) -> OptionsChainProvider:
     name = _provider_name(config, "options_data_provider", "yfinance")
     log_dir = str(config["log_dir"])
     if name == "yfinance":
-        return YFinanceProvider(logger=logger, log_dir=log_dir)
+        yf = YFinanceProvider(logger=logger, log_dir=log_dir)
+        secret_env_var = str(config.get("public_api_key_env_var", "PUBLIC_API_KEY"))
+        if os.environ.get(secret_env_var):
+            try:
+                public = PublicOptionsProvider(logger=logger, config=config, log_dir=log_dir)
+                logger.info(
+                    "yfinance provider extended with public.com fallback for missing expirations/chains"
+                )
+                return _ExtendedWithFallbackProvider(primary=yf, secondary=public, logger=logger)
+            except Exception as exc:
+                logger.warning("Could not initialise public provider as fallback: %s — using yfinance only", exc)
+        return yf
     if name == "public":
         secret_env_var = str(config.get("public_api_key_env_var", "PUBLIC_API_KEY"))
         yf_provider = YFinanceProvider(logger=logger, log_dir=log_dir)

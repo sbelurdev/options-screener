@@ -74,3 +74,9 @@ log_dir: ./logs/shared
 cache_dir: ./cache/shared
 price_history_period: 1y
 price_history_interval: 1d
+
+schedule:
+  enabled: true
+  times:
+    - "07:45"
+    - "12:00"

@@ -198,7 +198,7 @@ def _recommend_for_bucket(
                 reason += "; strike near resistance (favourable)"
 
         max_profit = round((strike - spot + premium) * 100, 2) if spot > 0 else None
-        downside_breakeven = round(spot - premium, 2) if spot > 0 else None
+        downside_breakeven = round(strike + premium, 2)
 
         row = _make_base_row(ticker, term_label, spot, min_acceptable_price)
         row.update({
@@ -314,7 +314,7 @@ def _recommend_monthly_cc(
                 reason += "; near resistance (favourable)"
 
         max_profit = round((strike - spot + premium) * 100, 2) if spot > 0 else None
-        downside_breakeven = round(spot - premium, 2) if spot > 0 else None
+        downside_breakeven = round(strike + premium, 2)
 
         row = _make_base_row(ticker, term_label, spot, min_acceptable_price)
         row.update({

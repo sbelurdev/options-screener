@@ -472,8 +472,6 @@ def write_reports(
         ".section-puts>summary:hover{background:#166f30;}"
         ".section-calls>summary{background:#6639ba;}"
         ".section-calls>summary:hover{background:#5b33a8;}"
-        ".section-calls-monthly>summary{background:#3d1f8c;}"
-        ".section-calls-monthly>summary:hover{background:#32197a;}"
         ".section-rec>summary{background:#9a6700;color:#fff;font-size:17px;}"
         ".section-rec>summary:hover{background:#875d00;}"
         ".section-rec>summary::before{color:#fff;}"
@@ -653,47 +651,41 @@ def write_reports(
             html_parts.append("".join(tbl_html))
             html_parts.append("</details>")
 
-        def render_section(section_df: pd.DataFrame, title: str, css_class: str) -> None:
-            n = len(section_df)
-            count_label = f"{n} candidate{'s' if n != 1 else ''}"
+        def render_section(
+            section_df: pd.DataFrame,
+            title: str,
+            css_class: str,
+            extra_monthly: Optional[List[Dict[str, Any]]] = None,
+        ) -> None:
+            monthly_df: Optional[pd.DataFrame] = None
+            if extra_monthly:
+                monthly_df = pd.DataFrame(extra_monthly)
+                for col in ("ivr", "max_profit", "score", "why_ranked_high"):
+                    if col not in monthly_df.columns:
+                        monthly_df[col] = None
+                monthly_df = monthly_df.sort_values(
+                    ["ticker", "expiration", "annualized_yield"],
+                    ascending=[True, True, False], na_position="last",
+                )
+
+            total = len(section_df) + (len(monthly_df) if monthly_df is not None else 0)
+            count_label = f"{total} candidate{'s' if total != 1 else ''}"
             html_parts.append(f"<details class='section {css_class}'>")
             html_parts.append(f"<summary>{title}<span class='count'>({count_label})</span></summary>")
             html_parts.append(_SECTION_CONTROLS)
+
             for term_label in ("Short-Term", "Medium-Term", "Long-Term"):
                 term_df = section_df[section_df["bucket_label"] == term_label]
                 if not term_df.empty:
                     render_candidate_term(term_df, term_label)
-            html_parts.append("</details>")
 
-        def render_monthly_call_section(monthly_candidates: List[Dict[str, Any]]) -> None:
-            if not monthly_candidates:
-                return
-            mdf = pd.DataFrame(monthly_candidates)
-            for col in ("ivr", "max_profit", "score", "why_ranked_high"):
-                if col not in mdf.columns:
-                    mdf[col] = None
-            mdf = mdf.sort_values(
-                ["ticker", "expiration", "annualized_yield"], ascending=[True, True, False], na_position="last"
-            )
-            n = len(mdf)
-            count_label = f"{n} candidate{'s' if n != 1 else ''}"
-            html_parts.append("<details class='section section-calls-monthly'>")
-            html_parts.append(
-                f"<summary>Monthly Sell Call Candidates — Beyond 45 Days"
-                f"<span class='count'>({count_label})</span></summary>"
-            )
-            html_parts.append(_SECTION_CONTROLS)
-            # Group by bucket_label (e.g. "Monthly - Jun 2026"), sorted chronologically
-            # by the earliest expiration in each group.
-            groups: Dict[str, pd.DataFrame] = {}
-            for label, gdf in mdf.groupby("bucket_label", sort=False):
-                groups[str(label)] = gdf
-            sorted_labels = sorted(
-                groups.keys(),
-                key=lambda lbl: groups[lbl]["expiration"].min()
-            )
-            for label in sorted_labels:
-                render_candidate_term(groups[label], label)
+            if monthly_df is not None and not monthly_df.empty:
+                groups: Dict[str, pd.DataFrame] = {}
+                for label, gdf in monthly_df.groupby("bucket_label", sort=False):
+                    groups[str(label)] = gdf
+                for label in sorted(groups, key=lambda lbl: groups[lbl]["expiration"].min()):
+                    render_candidate_term(groups[label], label)
+
             html_parts.append("</details>")
 
         puts_df = df[df["strategy"] == "PUT"]
@@ -702,8 +694,8 @@ def write_reports(
         if not puts_df.empty:
             render_section(puts_df, "Sell Put Candidates", "section-puts")
         if not calls_df.empty:
-            render_section(calls_df, "Sell Call Candidates", "section-calls")
-        render_monthly_call_section(monthly_call_candidates or [])
+            render_section(calls_df, "Sell Call Candidates", "section-calls",
+                           extra_monthly=monthly_call_candidates or [])
 
     html_parts.append("<hr>")
     html_parts.append(

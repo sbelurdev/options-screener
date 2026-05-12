@@ -8,3 +8,10 @@ cash_secured_put_tickers:
 output_dir: ./reports/vatsa
 log_dir: ./logs/vatsa
 cache_dir: ./cache/vatsa
+
+# Schedule overrides — uncomment and edit to use times different from base.yaml
+# schedule:
+#   enabled: true
+#   times:
+#     - "07:45"
+#     - "12:00"

@@ -14,3 +14,10 @@ cash_secured_put_tickers:
 output_dir: ./reports/prasanna
 log_dir: ./logs/prasanna
 cache_dir: ./cache/prasanna
+
+# Schedule overrides — uncomment and edit to use times different from base.yaml
+# schedule:
+#   enabled: true
+#   times:
+#     - "07:45"
+#     - "12:00"
