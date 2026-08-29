@@ -1,18 +1,20 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
 
 from agent.providers.base import FundamentalsProvider, MarketDataProvider, OptionsChainProvider
 from agent.providers.factory import build_fundamentals_provider, build_market_provider, build_options_provider
+from agent.notify.email_report import send_report_email
 from agent.recommendation.cc_recommender import build_cc_recommendations
 from agent.recommendation.csp_recommender import build_csp_recommendations, compute_ivr_proxy
 
-from agent.reporting.render import write_reports
-from agent.scoring.score import score_candidate
+from agent.reporting.render import write_per_ticker_reports, write_reports
+from agent.scoring.score import score_candidates
 from agent.signals.options_metrics import (
     build_option_records,
     get_dte,
@@ -20,7 +22,10 @@ from agent.signals.options_metrics import (
     select_expiration_dates,
     select_monthly_cc_expiration_dates,
 )
+from agent.signals.iv_history import compute_true_iv_rank, estimate_atm_iv, record_iv_snapshot
 from agent.signals.technicals import compute_technicals
+from agent.tracking.outcomes import evaluate_outcomes, record_recommendations
+from agent.tracking.raw_chain import record_raw_chain
 
 DEFAULT_CONFIG: Dict[str, Any] = {
     "covered_call_tickers": ["SPY", "QQQ", "MSFT", "AAPL"],
@@ -38,6 +43,22 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "min_volume": None,
     "max_spread_pct": None,
     "html_min_mid_price": 0.5,
+    "fill_price_factor": 0.5,  # expected fill = bid + factor × (ask − bid); 0.5 == mid
+    "fetch_max_workers": 4,    # tickers processed concurrently (1 = sequential)
+    "scoring": {
+        # Weights are normalized by their sum; see agent/scoring/score.py
+        "weights": {
+            "income": 0.35,
+            "delta": 0.20,
+            "trend": 0.15,
+            "liquidity": 0.10,
+            "vrp": 0.10,
+            "theta": 0.10,
+        },
+        "delta_target": 0.20,
+        "income_yield_cap": 1.5,
+    },
+
     "options_data_provider": "yfinance",
     "market_data_provider": "yfinance",
     "fundamentals_provider": "yfinance",
@@ -57,6 +78,27 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "output_dir": "./reports",
     "log_dir": "./logs",
     "cache_dir": "./cache",
+    # Shared across profiles so IV history accumulates from every scheduled run
+    "iv_history_path": "./cache/iv_history.csv",
+    # Raw provider chain snapshots — one CSV per ticker+strategy, e.g. AAPL_CALL.csv
+    "raw_chain_dir": "./cache/raw_chains",
+    "iv_rank_min_history_days": 20,  # observations before true IV Rank replaces the HV proxy
+    "outcome_tracking": {
+        "enabled": True,
+        "path": "./cache/outcomes.csv",  # ledger of recommendations graded after expiry
+    },
+    # Shared sending account for report emails; every profile sends "from" this
+    # mailbox. Per-profile opt-in / recipient is `notify_email` (unset = no
+    # email for that profile). Credentials come from env vars, not this file.
+    "email": {
+        "enabled": True,
+        "smtp_host": "smtp.gmail.com",
+        "smtp_port": 587,
+        "from_address": "Prasanna.Kudli@gmail.com",
+        "smtp_user_env_var": "SMTP_USER",
+        "smtp_password_env_var": "SMTP_PASSWORD",
+    },
+    "notify_email": None,  # set per-profile in config/users/<profile>.yaml to receive reports by email
     "price_history_period": "6mo",
     "price_history_interval": "1d",
     "cc_recommendation": {
@@ -146,17 +188,48 @@ def _process_ticker(
         cc_max_strike = float(cc_max_strike)
         logger.info("%s: CC max strike filter = %.2f", ticker, cc_max_strike)
 
+    # cc_recommendation.min_yield, when set, IS the screening yield threshold for
+    # CALLs — it overrides the global min_annualized_yield (which otherwise runs
+    # first and silently starves the CC tables of lower-yield strikes).
     cc_min_yield: Optional[float] = None
     _raw_min_yield = _cc_rec_cfg.get("min_yield")
+    call_config = config
     if _raw_min_yield is not None:
         cc_min_yield = float(_raw_min_yield)
-        logger.info("%s: CC min yield filter = %.0f%%", ticker, cc_min_yield * 100)
+        call_config = {**config, "min_annualized_yield": cc_min_yield}
+        logger.info("%s: CC min yield filter = %.0f%% (overrides global screening threshold for calls)",
+                    ticker, cc_min_yield * 100)
+
+    raw_chain_dir = Path(str(config.get("raw_chain_dir") or "./cache/raw_chains"))
+
+    # Best ATM IV observation for this run: (dte, iv) of the expiry nearest 30 DTE
+    atm_iv_obs: Optional[Tuple[int, float]] = None
+
+    # Records are collected per expiry but scored afterwards in one pool per
+    # strategy, so the income percentile compares across all expirations.
+    per_expiry: List[Tuple[date, List[Dict[str, Any]], List[Dict[str, Any]]]] = []
 
     for expiry in selected_dates:
         dte_days = get_dte(expiry, date.today())
         bucket_name, bucket_label = get_term_for_dte(dte_days)
 
         calls_df, puts_df = options_provider.get_options_chain(ticker, expiry)
+
+        # Persist the untouched provider chain before any pre-filtering/scoring.
+        try:
+            record_raw_chain(raw_chain_dir, ticker, "CALL", date.today(), expiry, calls_df, logger)
+            record_raw_chain(raw_chain_dir, ticker, "PUT", date.today(), expiry, puts_df, logger)
+        except Exception as exc:
+            logger.warning("%s %s: raw chain snapshot failed: %s", ticker, expiry.isoformat(), exc)
+
+        # ATM IV snapshot — taken from the raw chain before any strike pre-filtering.
+        # Auxiliary only: must never break screening for the ticker.
+        try:
+            est_iv = estimate_atm_iv(calls_df, puts_df, spot)
+            if est_iv is not None and (atm_iv_obs is None or abs(dte_days - 30) < abs(atm_iv_obs[0] - 30)):
+                atm_iv_obs = (dte_days, est_iv)
+        except Exception as exc:
+            logger.warning("%s %s: ATM IV estimate failed: %s", ticker, expiry.isoformat(), exc)
 
         # Pre-filter the calls DataFrame before any per-row computation.
         if calls_df is not None and not calls_df.empty and "strike" in calls_df.columns:
@@ -196,7 +269,7 @@ def _process_ticker(
                 spot=spot,
                 technicals=technicals,
                 earnings_date=earnings_date,
-                config=config,
+                config=call_config,
                 logger=logger,
                 decision_logger=lambda row: options_provider.log_option_screen_result(ticker, row),
             )
@@ -204,24 +277,14 @@ def _process_ticker(
             else []
         )
 
-        # Post-filter: drop calls below the global min yield threshold.
-        if cc_min_yield is not None and call_candidates:
-            before = len(call_candidates)
-            call_candidates = [
-                c for c in call_candidates
-                if (c.get("annualized_yield") or 0) >= cc_min_yield
-            ]
-            dropped = before - len(call_candidates)
-            if dropped:
-                logger.info("%s expiry=%s: dropped %d calls below %.0f%% yield",
-                            ticker, expiry.isoformat(), dropped, cc_min_yield * 100)
+        per_expiry.append((expiry, put_candidates, call_candidates))
 
-        all_expiry = put_candidates + call_candidates
-        for row in all_expiry:
-            score, why = score_candidate(row, technicals, config)
-            row["score"] = round(score, 4)
-            row["why_ranked_high"] = why
+    # Score each strategy's full pool (all expirations) so income percentiles
+    # compare like with like, then keep the top N per expiry as before.
+    score_candidates([p for _, ps, _ in per_expiry for p in ps], technicals, config)
+    score_candidates([c for _, _, cs in per_expiry for c in cs], technicals, config)
 
+    for expiry, put_candidates, call_candidates in per_expiry:
         top_puts = sorted(put_candidates, key=lambda x: x.get("score", 0.0), reverse=True)[:max_n]
         top_calls = sorted(call_candidates, key=lambda x: x.get("score", 0.0), reverse=True)[:max_n]
 
@@ -231,7 +294,7 @@ def _process_ticker(
         logger.info(
             "%s term=%s expiration=%s puts=%d calls=%d",
             ticker,
-            bucket_name,
+            get_term_for_dte(get_dte(expiry, date.today()))[0],
             expiry.isoformat(),
             len(top_puts),
             len(top_calls),
@@ -249,6 +312,10 @@ def _process_ticker(
                     ", ".join(d.isoformat() for d in monthly_dates) or "none")
         for expiry in monthly_dates:
             calls_df, _ = options_provider.get_options_chain(ticker, expiry)
+            try:
+                record_raw_chain(raw_chain_dir, ticker, "CALL", date.today(), expiry, calls_df, logger)
+            except Exception as exc:
+                logger.warning("%s %s: raw chain snapshot failed: %s", ticker, expiry.isoformat(), exc)
             if calls_df is not None and not calls_df.empty and "strike" in calls_df.columns:
                 strikes = calls_df["strike"].astype(float)
                 if cc_min_strike is not None:
@@ -267,25 +334,39 @@ def _process_ticker(
                 spot=spot,
                 technicals=technicals,
                 earnings_date=earnings_date,
-                config=config,
+                config=call_config,
                 logger=logger,
                 decision_logger=lambda row: options_provider.log_option_screen_result(ticker, row),
             )
-            if cc_min_yield is not None:
-                month_candidates = [
-                    c for c in month_candidates
-                    if (c.get("annualized_yield") or 0) >= cc_min_yield
-                ]
-            for row in month_candidates:
-                score, why = score_candidate(row, technicals, config)
-                row["score"] = round(score, 4)
-                row["why_ranked_high"] = why
             monthly_call_candidates.extend(month_candidates)
             logger.info("%s monthly expiry=%s candidates=%d", ticker, expiry.isoformat(), len(month_candidates))
+        # One scoring pool across all monthly expirations
+        score_candidates(monthly_call_candidates, technicals, config)
     ticker_result["monthly_call_candidates"] = monthly_call_candidates
 
-    # Attach ticker-level IVR (HV Rank) to every candidate for the detail table
-    ticker_ivr, ticker_ivr_source = compute_ivr_proxy(hist, None)
+    # Persist today's ATM IV observation and compute a true IV Rank once enough
+    # history has accumulated; until then recommenders fall back to the HV proxy.
+    iv_rank: Tuple[Optional[float], str] = (None, "no ATM IV observation this run")
+    if atm_iv_obs is not None:
+        iv_hist_path = Path(str(config.get("iv_history_path") or "./cache/iv_history.csv"))
+        try:
+            record_iv_snapshot(iv_hist_path, ticker, date.today(), atm_iv_obs[1], atm_iv_obs[0], spot, logger)
+            iv_rank = compute_true_iv_rank(
+                iv_hist_path,
+                ticker,
+                atm_iv_obs[1],
+                min_observations=int(config.get("iv_rank_min_history_days", 20)),
+            )
+        except Exception as exc:
+            logger.warning("%s: IV history update failed: %s", ticker, exc)
+    ticker_result["iv_rank"] = iv_rank
+
+    # Attach ticker-level IVR to every candidate for the detail table:
+    # true IV Rank when available, otherwise the HV-rank proxy.
+    if iv_rank[0] is not None:
+        ticker_ivr, ticker_ivr_source = iv_rank
+    else:
+        ticker_ivr, ticker_ivr_source = compute_ivr_proxy(hist, None)
     for c in ticker_result["candidates"]:
         c["ivr"] = ticker_ivr
         c["ivr_source"] = ticker_ivr_source
@@ -359,9 +440,9 @@ def run_pipeline(config: Dict[str, Any], logger) -> None:
     )
     logger.info("Starting options screener for tickers=%s", ",".join(all_tickers))
 
-    for ticker, strategies in ticker_strategies.items():
+    def _safe_process(ticker: str, strategies: List[str]) -> Optional[Dict[str, Any]]:
         try:
-            result = _process_ticker(
+            return _process_ticker(
                 ticker,
                 options_provider=options_provider,
                 market_provider=market_provider,
@@ -370,16 +451,49 @@ def run_pipeline(config: Dict[str, Any], logger) -> None:
                 logger=logger,
                 strategies=strategies,
             )
-            expiration_summary[ticker] = result.get("selected_expirations", [])
-            all_candidates.extend(result.get("candidates", []))
-            all_monthly_call_candidates.extend(result.get("monthly_call_candidates", []))
-            ticker_results_map[ticker] = result
         except Exception as exc:
             logger.exception("Failed processing %s: %s", ticker, exc)
+            return None
+
+    # Tickers are I/O-bound (HTTP chains/history), so process them concurrently;
+    # results are collected per ticker and merged in config order below so
+    # reports stay deterministic regardless of completion order.
+    max_workers = max(int(config.get("fetch_max_workers", 4) or 1), 1)
+    results_by_ticker: Dict[str, Optional[Dict[str, Any]]] = {}
+    if max_workers > 1 and len(ticker_strategies) > 1:
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {
+                executor.submit(_safe_process, ticker, strategies): ticker
+                for ticker, strategies in ticker_strategies.items()
+            }
+            for future in as_completed(futures):
+                results_by_ticker[futures[future]] = future.result()
+    else:
+        for ticker, strategies in ticker_strategies.items():
+            results_by_ticker[ticker] = _safe_process(ticker, strategies)
+
+    for ticker in ticker_strategies:
+        result = results_by_ticker.get(ticker)
+        if result is None:
             continue
+        expiration_summary[ticker] = result.get("selected_expirations", [])
+        all_candidates.extend(result.get("candidates", []))
+        all_monthly_call_candidates.extend(result.get("monthly_call_candidates", []))
+        ticker_results_map[ticker] = result
 
     cc_recommendations = build_cc_recommendations(ticker_results_map, cc_tickers, config)
     csp_recommendations = build_csp_recommendations(ticker_results_map, csp_tickers, config)
+
+    # Record today's recommendations and grade any whose expiration has passed
+    outcome_summary = None
+    tracking_cfg: Dict[str, Any] = config.get("outcome_tracking") or {}
+    if tracking_cfg.get("enabled", True):
+        ledger_path = Path(str(tracking_cfg.get("path") or "./cache/outcomes.csv"))
+        try:
+            record_recommendations(ledger_path, date.today(), cc_recommendations, csp_recommendations, logger)
+            outcome_summary = evaluate_outcomes(ledger_path, market_provider, logger)
+        except Exception as exc:
+            logger.exception("Outcome tracking failed: %s", exc)
 
     fallback_events = getattr(options_provider, "fallback_events", [])
     csv_path, html_path = write_reports(
@@ -389,6 +503,19 @@ def run_pipeline(config: Dict[str, Any], logger) -> None:
         monthly_call_candidates=all_monthly_call_candidates,
         fallback_events=fallback_events,
     )
+    per_ticker_html_paths = write_per_ticker_reports(
+        all_candidates, config, DISCLAIMER,
+        csp_recommendations=csp_recommendations,
+        cc_recommendations=cc_recommendations,
+        monthly_call_candidates=all_monthly_call_candidates,
+        cc_tickers=cc_tickers,
+        csp_tickers=csp_tickers,
+    )
+
+    try:
+        send_report_email(config, [html_path, *per_ticker_html_paths], logger)
+    except Exception as exc:
+        logger.exception("Email notification failed: %s", exc)
 
     run_day = date.today().isoformat()
     _out = Path(config["output_dir"])
@@ -444,6 +571,15 @@ def run_pipeline(config: Dict[str, Any], logger) -> None:
             strike = f"${rec['strike']:.2f}" if rec["strike"] else "—"
             ivr = f"{rec['ivr']:.0f}%" if rec["ivr"] is not None else "n/a"
             print(f"  {rec['ticker']:6s}  {rec.get('term',''):12s}  {verdict:10s}  strike={strike}  IVR={ivr}  {rec['reason']}")
+
+    if outcome_summary:
+        rate = outcome_summary.get("win_rate")
+        rate_str = f", premium-kept rate {rate:.0%}" if rate is not None else ""
+        print(
+            f"\nOutcome ledger: {outcome_summary['open']} open, "
+            f"{outcome_summary['closed']} closed"
+            f" ({outcome_summary['evaluated_now']} graded this run){rate_str}"
+        )
 
     print(f"\nCovered call tickers:      {', '.join(cc_tickers) or 'none'}")
     print(f"Cash-secured put tickers:  {', '.join(csp_tickers) or 'none'}")

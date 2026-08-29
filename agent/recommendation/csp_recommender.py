@@ -122,6 +122,7 @@ def _recommend_csp_for_term(
     technicals: Dict[str, float],
     earnings_date: Optional[date],
     rec_config: Dict[str, Any],
+    iv_rank: Optional[Tuple[Optional[float], str]] = None,
 ) -> Dict[str, Any]:
     """
     Produce one CSP recommendation for a single ticker and time-horizon term.
@@ -167,26 +168,29 @@ def _recommend_csp_for_term(
         base["reason"] = f"No {term_label} PUT candidates survived initial screening"
         return base
 
-    # ── IVR proxy ──────────────────────────────────────────────────────────────
+    # ── IVR: true IV Rank from persisted history when available, HV proxy otherwise
     current_iv = next(
         (float(c["implied_volatility"]) for c in put_candidates if c.get("implied_volatility")),
         None,
     )
-    ivr_value, ivr_source = compute_ivr_proxy(price_df, current_iv)
+    if iv_rank is not None and iv_rank[0] is not None:
+        ivr_value, ivr_source = iv_rank
+    else:
+        ivr_value, ivr_source = compute_ivr_proxy(price_df, current_iv)
 
-    # ── Earnings proximity ─────────────────────────────────────────────────────
-    exp_date = None
-    exp_str = put_candidates[0].get("expiration")
-    if exp_str:
+    # ── Earnings proximity (per candidate's own expiration — a term pool can
+    #    mix multiple expirations, so a single shared check would be wrong) ────
+    def _earnings_too_close(c: Dict) -> bool:
+        if earnings_date is None:
+            return False
+        c_exp_str = c.get("expiration")
+        if not c_exp_str:
+            return False
         try:
-            exp_date = date.fromisoformat(str(exp_str))
+            c_exp = date.fromisoformat(str(c_exp_str))
         except ValueError:
-            pass
-
-    earnings_too_close = False
-    if earnings_date is not None and exp_date is not None:
-        days_before_exp = (exp_date - earnings_date).days
-        earnings_too_close = earnings_date <= exp_date and days_before_exp <= earnings_buffer
+            return False
+        return earnings_date <= c_exp and (c_exp - earnings_date).days <= earnings_buffer
 
     # ── Support levels ─────────────────────────────────────────────────────────
     support = get_support_levels(price_df)
@@ -218,11 +222,18 @@ def _recommend_csp_for_term(
         qualified = [c for c in put_candidates if _delta_ok(c)]
         support_relaxed = bool(qualified)
 
+    # Prefer candidates whose own expiration is clear of earnings; only if every
+    # qualified candidate conflicts does the earnings hard-fail apply to the best.
+    if qualified:
+        earnings_clear = [c for c in qualified if not _earnings_too_close(c)]
+        if earnings_clear:
+            qualified = earnings_clear
+
     if not qualified:
         reasons: List[str] = []
         if ivr_value is not None and ivr_value < ivr_min:
             reasons.append(f"IVR {ivr_value:.0f}% below {ivr_min:.0f}% threshold")
-        if earnings_too_close:
+        if any(_earnings_too_close(c) for c in put_candidates):
             reasons.append("earnings too close to expiration")
         reasons.append(f"no strike with |delta| {delta_min:.2f}–{delta_max:.2f}")
         base["reason"] = "; ".join(reasons)
@@ -233,7 +244,8 @@ def _recommend_csp_for_term(
     # Best = highest composite score (balances income, delta, trend, liquidity)
     best = max(qualified, key=lambda x: float(x.get("score") or 0))
     strike = float(best["strike"])
-    premium = float(best.get("mid", 0))
+    premium = float(best.get("fill_price") or best.get("mid", 0))
+    earnings_too_close = _earnings_too_close(best)
     delta_val = best.get("delta")
     dte_val = best.get("dte")
     near_round = _near_round_number(strike)
@@ -250,9 +262,9 @@ def _recommend_csp_for_term(
     if ivr_value is None:
         soft_fails.append(f"IVR unavailable ({ivr_source})")
     elif ivr_value >= 99.9:
-        soft_fails.append("IVR proxy at ceiling (100%) — likely overstated vs. 1-yr HV range")
+        soft_fails.append("IVR at ceiling (100%) — at the top of its 1-yr range")
     elif ivr_value == 0.0:
-        soft_fails.append("IVR proxy at floor (0%) — current vol may be understated")
+        soft_fails.append("IVR at floor (0%) — current vol may be understated")
     if support_relaxed:
         soft_fails.append("strike above support levels — use caution")
 
@@ -296,6 +308,7 @@ def recommend_csp_for_ticker(
     technicals: Dict[str, float],
     earnings_date: Optional[date],
     rec_config: Dict[str, Any],
+    iv_rank: Optional[Tuple[Optional[float], str]] = None,
 ) -> List[Dict[str, Any]]:
     """
     Produce CSP recommendations (Short-Term / Medium-Term / Long-Term) for one ticker.
@@ -321,6 +334,7 @@ def recommend_csp_for_ticker(
                 technicals=technicals,
                 earnings_date=earnings_date,
                 rec_config=rec_config,
+                iv_rank=iv_rank,
             )
         )
     return results
@@ -354,6 +368,7 @@ def build_csp_recommendations(
             technicals=tr.get("technicals", {}),
             earnings_date=tr.get("earnings_date"),
             rec_config=rec_config,
+            iv_rank=tr.get("iv_rank"),
         )
         results.extend(recs)
 

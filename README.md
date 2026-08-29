@@ -1,4 +1,8 @@
-# options-screener
+# PremiumEdge — options screener
+
+*Find the richest premium, risk-adjusted.* Covered-call and cash-secured-put
+screening with risk-adjusted scoring, IV-rank tracking, and outcome grading.
+The Streamlit dashboard (`streamlit run app.py`) is branded **PremiumEdge**.
 
 ## Data Source Map (Hybrid)
 
@@ -41,6 +45,38 @@ Public-related config keys in config:
 - `public_http_timeout_seconds` (default `20`)
 - `public_account_id` (optional; if omitted, app discovers brokerage account)
 - `public_underlying_instrument_type` (default `EQUITY`)
+
+## Email Reports
+
+Each run can email the HTML reports (the combined report plus every
+per-ticker `{TICKER}-CALL.html` / `{TICKER}-CSP.html`) to a recipient. It's
+opt-in per profile:
+
+- Set `notify_email: you@example.com` in your `config/users/<profile>.yaml`.
+- Profiles with no `notify_email` are skipped with a logged warning
+  (`Email notification skipped: missing 'notify_email' in <profile>.yaml`) —
+  not an error, the run still completes normally.
+
+All profiles send **from** the same shared mailbox, configured under `email:`
+in `config/base.yaml` (default: via `smtp.gmail.com`). That mailbox's login
+credentials are read from environment variables, not from any YAML file:
+
+```dotenv
+SMTP_USER=your_sending_account@gmail.com
+SMTP_PASSWORD=your_app_password_here
+```
+
+Add these to the same `.env` file used for `PUBLIC_API_KEY` (repo root,
+already gitignored). `SMTP_PASSWORD` must be a Gmail **app password**, not
+the account's normal sign-in password: turn on 2-Step Verification at
+myaccount.google.com → Security, then Security → App passwords → generate
+one for "Mail", and use that 16-character value here.
+
+> Outlook/outlook.com was tried first but Microsoft now requires OAuth2
+> ("Modern Auth") for SMTP on that kind of mailbox — a plain username +
+> app-password login (what this code does) is rejected outright regardless
+> of any account setting. Gmail still supports app-password SMTP auth, which
+> is why it's the default here.
 
 ## Run in a Python virtual environment (PowerShell)
 

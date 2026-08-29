@@ -7,6 +7,14 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
 
+from agent.reporting.dashboard_table import (
+    _build_calls_display,
+    _build_puts_display,
+    _render_html_table,
+    build_calls_combined,
+    build_puts_combined,
+)
+
 
 def _empty_df() -> pd.DataFrame:
     return pd.DataFrame(
@@ -23,6 +31,7 @@ def _empty_df() -> pd.DataFrame:
             "bid",
             "ask",
             "mid",
+            "fill_price",
             "spread_pct",
             "volume",
             "open_interest",
@@ -413,6 +422,274 @@ def _render_csp_recommendations(recommendations: List[Dict[str, Any]], html_part
     html_parts.append("</details>")
 
 
+_STYLE_BLOCK = (
+    "<style>"
+    "body{font-family:Segoe UI,Arial,sans-serif;margin:20px;background:#fff;}"
+    "h1{margin-bottom:8px;}"
+    "details{margin-bottom:6px;}"
+    "summary{cursor:pointer;padding:7px 12px;border-radius:4px;user-select:none;list-style:none;display:flex;align-items:center;gap:6px;}"
+    "summary::-webkit-details-marker{display:none;}"
+    "summary::before{content:'▸';font-size:14px;transition:transform 0.15s;}"
+    "details[open]>summary::before{transform:rotate(90deg);}"
+    ".section>summary{font-size:16px;font-weight:700;background:#0969da;color:#fff;border:none;}"
+    ".section>summary:hover{background:#0860ca;}"
+    ".section>summary::before{color:#fff;}"
+    ".ticker-block{margin-left:20px;}"
+    ".ticker-block>summary{font-size:13px;font-weight:600;background:#f6f8fa;border:1px solid #d0d7de;color:#24292f;}"
+    ".ticker-block>summary:hover{background:#eaf0fb;}"
+    ".rec-term{margin:0 0 8px 12px;}"
+    ".rec-term>summary{font-size:13px;font-weight:600;background:#f6f8fa;border:1px solid #d0d7de;color:#24292f;}"
+    ".rec-term>summary:hover{background:#eaf0fb;}"
+    ".report-controls{display:flex;gap:8px;margin:8px 0 14px;}"
+    ".report-controls button{border:1px solid #d0d7de;background:#f6f8fa;color:#24292f;border-radius:6px;padding:6px 12px;font-size:12px;font-weight:600;cursor:pointer;}"
+    ".report-controls button:hover{background:#eaeef2;}"
+    ".section-controls{display:flex;gap:6px;margin:0 0 8px;}"
+    ".section-controls button{border:1px solid #d0d7de;background:#f6f8fa;color:#24292f;border-radius:4px;padding:2px 8px;font-size:11px;font-weight:500;cursor:pointer;}"
+    ".section-controls button:hover{background:#eaeef2;}"
+    "table{border-collapse:collapse;width:auto;margin:6px 0 6px 20px;}"
+    "th,td{border:1px solid #d0d7de;padding:3px 6px;font-size:12px;text-align:left;white-space:nowrap;vertical-align:top;}"
+    "th{background:#f6f8fa;font-weight:600;}"
+    "tr:nth-child(even){background:#f9f9f9;}"
+    ".count{font-weight:400;font-size:13px;opacity:0.85;margin-left:6px;}"
+    ".note{font-size:12px;color:#444;padding:8px;background:#fff8c5;border:1px solid #e3b341;border-radius:4px;margin-bottom:12px;}"
+    "a{color:inherit;}"
+    ".section-puts>summary{background:#1a7f37;}"
+    ".section-puts>summary:hover{background:#166f30;}"
+    ".section-calls>summary{background:#6639ba;}"
+    ".section-calls>summary:hover{background:#5b33a8;}"
+    ".section-rec>summary{background:#9a6700;color:#fff;font-size:17px;}"
+    ".section-rec>summary:hover{background:#875d00;}"
+    ".section-rec>summary::before{color:#fff;}"
+    ".rec-body{padding:8px 12px 12px;}"
+    ".rec-table{margin:0 0 10px 0;width:100%;}"
+    ".rec-table th{background:#fdf0d5;font-size:12px;}"
+    ".rec-table td{font-size:12px;}"
+    ".rec-yes{background:#d4edda;color:#155724;font-weight:600;}"
+    ".rec-no{background:#f8d7da;color:#721c24;font-weight:600;}"
+    ".reason-cell{white-space:normal;min-width:180px;max-width:320px;font-size:11px;color:#444;}"
+    ".rec-footnote{font-size:11px;color:#666;margin:4px 0 8px;font-style:italic;}"
+    ".exit-rules{font-size:12px;background:#f0f7ff;border:1px solid #b6d4fe;border-radius:4px;padding:8px 12px;margin-top:4px;}"
+    ".exit-rules ul{margin:4px 0 0 16px;padding:0;}"
+    ".exit-rules li{margin-bottom:2px;}"
+    ".warn-banner{background:#fff3cd;border:2px solid #ffc107;border-radius:6px;padding:10px 14px;margin-bottom:14px;}"
+    ".warn-banner h3{margin:0 0 6px;color:#856404;font-size:14px;}"
+    ".warn-banner ul{margin:4px 0 0 18px;padding:0;color:#6c4a00;font-size:13px;}"
+    ".warn-banner li{margin-bottom:3px;}"
+    ".section-cc-rec>summary{background:#0d6efd;color:#fff;font-size:17px;}"
+    ".section-cc-rec>summary:hover{background:#0b5ed7;}"
+    ".section-cc-rec>summary::before{color:#fff;}"
+    ".section-cc-monthly>summary{background:#0a6640;color:#fff;font-size:17px;}"
+    ".section-cc-monthly>summary:hover{background:#085534;}"
+    ".section-cc-monthly>summary::before{color:#fff;}"
+    ".cc-rec-body{padding:8px 12px 12px;}"
+    ".cc-rec-table{margin:0 0 10px 0;width:100%;}"
+    ".cc-rec-table th{background:#dbeafe;font-size:12px;}"
+    ".cc-rec-table td{font-size:12px;}"
+    ".flag-res{color:#0d6efd;font-weight:600;}"
+    ".flag-round{color:#6c757d;}"
+    ".flag-below{color:#dc3545;font-weight:600;}"
+    "</style>"
+)
+
+
+def _html_head(title: str) -> List[str]:
+    return [
+        "<!DOCTYPE html><html><head><meta charset='utf-8'>",
+        f"<title>{escape(title)}</title>",
+        _STYLE_BLOCK,
+        "</head><body>",
+    ]
+
+
+def _html_report_controls() -> str:
+    return (
+        "<div class='report-controls'>"
+        "<button type='button' onclick=\"document.querySelectorAll('details').forEach(d => d.open = true)\">Expand All</button>"
+        "<button type='button' onclick=\"document.querySelectorAll('details').forEach(d => d.open = false)\">Collapse All</button>"
+        "</div>"
+    )
+
+
+def _html_footer() -> List[str]:
+    return [
+        "<hr>",
+        "<p><strong>Risk reminders:</strong> Assignment risk, overnight gaps, earnings/event shocks, "
+        "liquidity deterioration, and tail-risk moves can cause losses.</p>",
+        "</body></html>",
+    ]
+
+
+def _render_candidate_term(term_df: pd.DataFrame, term_label: str, html_parts: List[str]) -> None:
+    count_label = f"{len(term_df)} candidate{'s' if len(term_df) != 1 else ''}"
+    html_parts.append("<details class='rec-term'>")
+    html_parts.append(
+        f"<summary>{escape(_display_term_label(term_label))}<span class='count'>({count_label})</span></summary>"
+    )
+
+    tdf = term_df.copy()
+    for col in ("ivr", "max_profit", "fill_price", "vrp", "theta_yield", "score"):
+        if col not in tdf.columns:
+            tdf[col] = None
+    # Older records without an expected fill price fall back to mid
+    tdf["fill_price"] = tdf["fill_price"].fillna(tdf["mid"])
+
+    tdf = tdf.sort_values(
+        ["ticker", "expiration", "annualized_yield"], ascending=[True, True, False], na_position="last"
+    )
+
+    view = tdf[
+        [
+            "ticker",
+            "annualized_yield",
+            "spot",
+            "strike",
+            "otm_pct",
+            "expiration",
+            "dte",
+            "fill_price",
+            "delta",
+            "ivr",
+            "vrp",
+            "theta_yield",
+            "max_profit",
+            "breakeven",
+            "score",
+            "why_ranked_high",
+        ]
+    ].copy()
+    view["annualized_yield"] = (view["annualized_yield"] * 100).map(
+        lambda x: f"{x:.2f}%" if pd.notna(x) else "-"
+    )
+    view["otm_pct"] = view["otm_pct"].map(
+        lambda x: f"{x * 100:.2f}%" if pd.notna(x) else "-"
+    )
+    view["delta"] = view["delta"].map(lambda x: "-" if pd.isna(x) else f"{x:.3f}")
+    view["ivr"] = view["ivr"].map(
+        lambda x: "-" if pd.isna(x) or x is None else f"{x:.1f}%"
+    )
+    view["vrp"] = view["vrp"].map(
+        lambda x: "-" if pd.isna(x) or x is None else f"{float(x):.2f}"
+    )
+    view["theta_yield"] = view["theta_yield"].map(
+        lambda x: "-" if pd.isna(x) or x is None else f"{float(x) * 100:.0f}%"
+    )
+    view["score"] = view["score"].map(
+        lambda x: "-" if pd.isna(x) or x is None else f"{float(x):.3f}"
+    )
+    view["max_profit"] = view["max_profit"].map(
+        lambda x: "-" if pd.isna(x) or x is None else f"${x:,.2f}"
+    )
+    view["breakeven"] = view["breakeven"].map(
+        lambda x: "-" if pd.isna(x) or x is None else f"${x:,.2f}"
+    )
+    view = view.rename(
+        columns={
+            "ticker": "Ticker",
+            "annualized_yield": "AnnualYield",
+            "spot": "Current",
+            "strike": "Strike",
+            "otm_pct": "%OTM",
+            "expiration": "Expiration",
+            "dte": "DTE",
+            "fill_price": "Premium",
+            "delta": "Delta",
+            "ivr": "IVR",
+            "vrp": "VRP",
+            "theta_yield": "ThetaYld",
+            "max_profit": "MaxProfit",
+            "breakeven": "Breakeven",
+            "score": "Score",
+            "why_ranked_high": "Why",
+        }
+    )
+
+    display_cols = list(view.columns)
+    tbl_html = ["<table class='table'><thead><tr>"]
+    for col in display_cols:
+        tbl_html.append(f"<th>{escape(col)}</th>")
+    tbl_html.append("</tr></thead><tbody>")
+
+    group_colors = ("#ffffff", "#f1f3f5")
+    prev_ticker = None
+    grp_idx = -1
+    for _, row in view.iterrows():
+        ticker_val = str(row.get("Ticker", ""))
+        if ticker_val != prev_ticker:
+            grp_idx += 1
+            prev_ticker = ticker_val
+        row_bg = group_colors[grp_idx % 2]
+        tbl_html.append(f"<tr style='background-color:{row_bg}'>")
+        for col in display_cols:
+            cell = row[col]
+            if col in ("Current", "Strike", "Premium"):
+                try:
+                    cell_str = f"${float(cell):,.2f}"
+                except (ValueError, TypeError):
+                    cell_str = "-"
+            elif col == "DTE":
+                try:
+                    cell_str = str(int(float(cell)))
+                except (ValueError, TypeError):
+                    cell_str = "-"
+            elif col == "Ticker":
+                fidelity_url = f"https://digital.fidelity.com/ftgw/digital/options-research/?symbol={cell}"
+                cell_str = (
+                    f"<a href='{escape(fidelity_url)}' target='_blank' rel='noopener noreferrer'>"
+                    f"<strong>{escape(str(cell))}</strong></a>"
+                )
+                tbl_html.append(f"<td>{cell_str}</td>")
+                continue
+            else:
+                try:
+                    cell_str = "-" if pd.isna(cell) else str(cell)
+                except TypeError:
+                    cell_str = str(cell) if cell is not None else "-"
+            tbl_html.append(f"<td>{escape(cell_str)}</td>")
+        tbl_html.append("</tr>")
+    tbl_html.append("</tbody></table>")
+    html_parts.append("".join(tbl_html))
+    html_parts.append("</details>")
+
+
+def _render_candidate_section(
+    section_df: pd.DataFrame,
+    title: str,
+    css_class: str,
+    html_parts: List[str],
+    extra_monthly: Optional[List[Dict[str, Any]]] = None,
+) -> None:
+    monthly_df: Optional[pd.DataFrame] = None
+    if extra_monthly:
+        monthly_df = pd.DataFrame(extra_monthly)
+        for col in ("ivr", "max_profit", "score", "why_ranked_high"):
+            if col not in monthly_df.columns:
+                monthly_df[col] = None
+        monthly_df = monthly_df.sort_values(
+            ["ticker", "expiration", "annualized_yield"],
+            ascending=[True, True, False], na_position="last",
+        )
+
+    total = len(section_df) + (len(monthly_df) if monthly_df is not None else 0)
+    count_label = f"{total} candidate{'s' if total != 1 else ''}"
+    html_parts.append(f"<details class='section {css_class}'>")
+    html_parts.append(f"<summary>{title}<span class='count'>({count_label})</span></summary>")
+    html_parts.append(_SECTION_CONTROLS)
+
+    for term_label in ("Short-Term", "Medium-Term", "Long-Term"):
+        term_df = section_df[section_df["bucket_label"] == term_label]
+        if not term_df.empty:
+            _render_candidate_term(term_df, term_label, html_parts)
+
+    if monthly_df is not None and not monthly_df.empty:
+        groups: Dict[str, pd.DataFrame] = {}
+        for label, gdf in monthly_df.groupby("bucket_label", sort=False):
+            groups[str(label)] = gdf
+        for label in sorted(groups, key=lambda lbl: groups[lbl]["expiration"].min()):
+            _render_candidate_term(groups[label], label, html_parts)
+
+    html_parts.append("</details>")
+
+
 def write_reports(
     candidates: List[Dict[str, Any]],
     config: Dict[str, Any],
@@ -435,85 +712,11 @@ def write_reports(
     df.to_csv(csv_path, index=False)
 
     html_parts: List[str] = []
-    html_parts.append("<!DOCTYPE html><html><head><meta charset='utf-8'>")
-    html_parts.append("<title>Options Report</title>")
-    html_parts.append(
-        "<style>"
-        "body{font-family:Segoe UI,Arial,sans-serif;margin:20px;background:#fff;}"
-        "h1{margin-bottom:8px;}"
-        "details{margin-bottom:6px;}"
-        "summary{cursor:pointer;padding:7px 12px;border-radius:4px;user-select:none;list-style:none;display:flex;align-items:center;gap:6px;}"
-        "summary::-webkit-details-marker{display:none;}"
-        "summary::before{content:'▸';font-size:14px;transition:transform 0.15s;}"
-        "details[open]>summary::before{transform:rotate(90deg);}"
-        ".section>summary{font-size:16px;font-weight:700;background:#0969da;color:#fff;border:none;}"
-        ".section>summary:hover{background:#0860ca;}"
-        ".section>summary::before{color:#fff;}"
-        ".ticker-block{margin-left:20px;}"
-        ".ticker-block>summary{font-size:13px;font-weight:600;background:#f6f8fa;border:1px solid #d0d7de;color:#24292f;}"
-        ".ticker-block>summary:hover{background:#eaf0fb;}"
-        ".rec-term{margin:0 0 8px 12px;}"
-        ".rec-term>summary{font-size:13px;font-weight:600;background:#f6f8fa;border:1px solid #d0d7de;color:#24292f;}"
-        ".rec-term>summary:hover{background:#eaf0fb;}"
-        ".report-controls{display:flex;gap:8px;margin:8px 0 14px;}"
-        ".report-controls button{border:1px solid #d0d7de;background:#f6f8fa;color:#24292f;border-radius:6px;padding:6px 12px;font-size:12px;font-weight:600;cursor:pointer;}"
-        ".report-controls button:hover{background:#eaeef2;}"
-        ".section-controls{display:flex;gap:6px;margin:0 0 8px;}"
-        ".section-controls button{border:1px solid #d0d7de;background:#f6f8fa;color:#24292f;border-radius:4px;padding:2px 8px;font-size:11px;font-weight:500;cursor:pointer;}"
-        ".section-controls button:hover{background:#eaeef2;}"
-        "table{border-collapse:collapse;width:auto;margin:6px 0 6px 20px;}"
-        "th,td{border:1px solid #d0d7de;padding:3px 6px;font-size:12px;text-align:left;white-space:nowrap;vertical-align:top;}"
-        "th{background:#f6f8fa;font-weight:600;}"
-        "tr:nth-child(even){background:#f9f9f9;}"
-        ".count{font-weight:400;font-size:13px;opacity:0.85;margin-left:6px;}"
-        ".note{font-size:12px;color:#444;padding:8px;background:#fff8c5;border:1px solid #e3b341;border-radius:4px;margin-bottom:12px;}"
-        "a{color:inherit;}"
-        ".section-puts>summary{background:#1a7f37;}"
-        ".section-puts>summary:hover{background:#166f30;}"
-        ".section-calls>summary{background:#6639ba;}"
-        ".section-calls>summary:hover{background:#5b33a8;}"
-        ".section-rec>summary{background:#9a6700;color:#fff;font-size:17px;}"
-        ".section-rec>summary:hover{background:#875d00;}"
-        ".section-rec>summary::before{color:#fff;}"
-        ".rec-body{padding:8px 12px 12px;}"
-        ".rec-table{margin:0 0 10px 0;width:100%;}"
-        ".rec-table th{background:#fdf0d5;font-size:12px;}"
-        ".rec-table td{font-size:12px;}"
-        ".rec-yes{background:#d4edda;color:#155724;font-weight:600;}"
-        ".rec-no{background:#f8d7da;color:#721c24;font-weight:600;}"
-        ".reason-cell{white-space:normal;min-width:180px;max-width:320px;font-size:11px;color:#444;}"
-        ".rec-footnote{font-size:11px;color:#666;margin:4px 0 8px;font-style:italic;}"
-        ".exit-rules{font-size:12px;background:#f0f7ff;border:1px solid #b6d4fe;border-radius:4px;padding:8px 12px;margin-top:4px;}"
-        ".exit-rules ul{margin:4px 0 0 16px;padding:0;}"
-        ".exit-rules li{margin-bottom:2px;}"
-        ".warn-banner{background:#fff3cd;border:2px solid #ffc107;border-radius:6px;padding:10px 14px;margin-bottom:14px;}"
-        ".warn-banner h3{margin:0 0 6px;color:#856404;font-size:14px;}"
-        ".warn-banner ul{margin:4px 0 0 18px;padding:0;color:#6c4a00;font-size:13px;}"
-        ".warn-banner li{margin-bottom:3px;}"
-        ".section-cc-rec>summary{background:#0d6efd;color:#fff;font-size:17px;}"
-        ".section-cc-rec>summary:hover{background:#0b5ed7;}"
-        ".section-cc-rec>summary::before{color:#fff;}"
-        ".section-cc-monthly>summary{background:#0a6640;color:#fff;font-size:17px;}"
-        ".section-cc-monthly>summary:hover{background:#085534;}"
-        ".section-cc-monthly>summary::before{color:#fff;}"
-        ".cc-rec-body{padding:8px 12px 12px;}"
-        ".cc-rec-table{margin:0 0 10px 0;width:100%;}"
-        ".cc-rec-table th{background:#dbeafe;font-size:12px;}"
-        ".cc-rec-table td{font-size:12px;}"
-        ".flag-res{color:#0d6efd;font-weight:600;}"
-        ".flag-round{color:#6c757d;}"
-        ".flag-below{color:#dc3545;font-weight:600;}"
-        "</style></head><body>"
-    )
+    html_parts.extend(_html_head("Options Report"))
     profile_name = str(config.get("active_profile") or "").strip()
     profile_suffix = f" (for {profile_name})" if profile_name else ""
     html_parts.append(f"<h1>Daily Options Screening Report{escape(profile_suffix)} &mdash; {run_day}</h1>")
-    html_parts.append(
-        "<div class='report-controls'>"
-        "<button type='button' onclick=\"document.querySelectorAll('details').forEach(d => d.open = true)\">Expand All</button>"
-        "<button type='button' onclick=\"document.querySelectorAll('details').forEach(d => d.open = false)\">Collapse All</button>"
-        "</div>"
-    )
+    html_parts.append(_html_report_controls())
     html_parts.append(f"<p class='note'>{escape(disclaimer)}</p>")
 
     if fallback_events:
@@ -537,172 +740,136 @@ def write_reports(
     if df.empty:
         html_parts.append("<p>No candidates passed filters today.</p>")
     else:
-        def render_candidate_term(term_df: pd.DataFrame, term_label: str) -> None:
-            count_label = f"{len(term_df)} candidate{'s' if len(term_df) != 1 else ''}"
-            html_parts.append("<details class='rec-term'>")
-            html_parts.append(
-                f"<summary>{escape(_display_term_label(term_label))}<span class='count'>({count_label})</span></summary>"
-            )
-
-            tdf = term_df.copy()
-            for col in ("ivr", "max_profit"):
-                if col not in tdf.columns:
-                    tdf[col] = None
-
-            tdf = tdf.sort_values(
-                ["ticker", "expiration", "annualized_yield"], ascending=[True, True, False], na_position="last"
-            )
-
-            view = tdf[
-                [
-                    "ticker",
-                    "annualized_yield",
-                    "spot",
-                    "strike",
-                    "otm_pct",
-                    "expiration",
-                    "dte",
-                    "mid",
-                    "delta",
-                    "ivr",
-                    "max_profit",
-                    "breakeven",
-                    "why_ranked_high",
-                ]
-            ].copy()
-            view["annualized_yield"] = (view["annualized_yield"] * 100).map(
-                lambda x: f"{x:.2f}%" if pd.notna(x) else "-"
-            )
-            view["otm_pct"] = view["otm_pct"].map(
-                lambda x: f"{x * 100:.2f}%" if pd.notna(x) else "-"
-            )
-            view["delta"] = view["delta"].map(lambda x: "-" if pd.isna(x) else f"{x:.3f}")
-            view["ivr"] = view["ivr"].map(
-                lambda x: "-" if pd.isna(x) or x is None else f"{x:.1f}%"
-            )
-            view["max_profit"] = view["max_profit"].map(
-                lambda x: "-" if pd.isna(x) or x is None else f"${x:,.2f}"
-            )
-            view["breakeven"] = view["breakeven"].map(
-                lambda x: "-" if pd.isna(x) or x is None else f"${x:,.2f}"
-            )
-            view = view.rename(
-                columns={
-                    "ticker": "Ticker",
-                    "annualized_yield": "AnnualYield",
-                    "spot": "Current",
-                    "strike": "Strike",
-                    "otm_pct": "%OTM",
-                    "expiration": "Expiration",
-                    "dte": "DTE",
-                    "mid": "Premium",
-                    "delta": "Delta",
-                    "ivr": "IVR",
-                    "max_profit": "MaxProfit",
-                    "breakeven": "Breakeven",
-                    "why_ranked_high": "Why",
-                }
-            )
-
-            display_cols = list(view.columns)
-            tbl_html = ["<table class='table'><thead><tr>"]
-            for col in display_cols:
-                tbl_html.append(f"<th>{escape(col)}</th>")
-            tbl_html.append("</tr></thead><tbody>")
-
-            group_colors = ("#ffffff", "#f1f3f5")
-            prev_ticker = None
-            grp_idx = -1
-            for _, row in view.iterrows():
-                ticker_val = str(row.get("Ticker", ""))
-                if ticker_val != prev_ticker:
-                    grp_idx += 1
-                    prev_ticker = ticker_val
-                row_bg = group_colors[grp_idx % 2]
-                tbl_html.append(f"<tr style='background-color:{row_bg}'>")
-                for col in display_cols:
-                    cell = row[col]
-                    if col in ("Current", "Strike", "Premium"):
-                        try:
-                            cell_str = f"${float(cell):,.2f}"
-                        except (ValueError, TypeError):
-                            cell_str = "-"
-                    elif col == "DTE":
-                        try:
-                            cell_str = str(int(float(cell)))
-                        except (ValueError, TypeError):
-                            cell_str = "-"
-                    elif col == "Ticker":
-                        fidelity_url = f"https://digital.fidelity.com/ftgw/digital/options-research/?symbol={cell}"
-                        cell_str = (
-                            f"<a href='{escape(fidelity_url)}' target='_blank' rel='noopener noreferrer'>"
-                            f"<strong>{escape(str(cell))}</strong></a>"
-                        )
-                        tbl_html.append(f"<td>{cell_str}</td>")
-                        continue
-                    else:
-                        try:
-                            cell_str = "-" if pd.isna(cell) else str(cell)
-                        except TypeError:
-                            cell_str = str(cell) if cell is not None else "-"
-                    tbl_html.append(f"<td>{escape(cell_str)}</td>")
-                tbl_html.append("</tr>")
-            tbl_html.append("</tbody></table>")
-            html_parts.append("".join(tbl_html))
-            html_parts.append("</details>")
-
-        def render_section(
-            section_df: pd.DataFrame,
-            title: str,
-            css_class: str,
-            extra_monthly: Optional[List[Dict[str, Any]]] = None,
-        ) -> None:
-            monthly_df: Optional[pd.DataFrame] = None
-            if extra_monthly:
-                monthly_df = pd.DataFrame(extra_monthly)
-                for col in ("ivr", "max_profit", "score", "why_ranked_high"):
-                    if col not in monthly_df.columns:
-                        monthly_df[col] = None
-                monthly_df = monthly_df.sort_values(
-                    ["ticker", "expiration", "annualized_yield"],
-                    ascending=[True, True, False], na_position="last",
-                )
-
-            total = len(section_df) + (len(monthly_df) if monthly_df is not None else 0)
-            count_label = f"{total} candidate{'s' if total != 1 else ''}"
-            html_parts.append(f"<details class='section {css_class}'>")
-            html_parts.append(f"<summary>{title}<span class='count'>({count_label})</span></summary>")
-            html_parts.append(_SECTION_CONTROLS)
-
-            for term_label in ("Short-Term", "Medium-Term", "Long-Term"):
-                term_df = section_df[section_df["bucket_label"] == term_label]
-                if not term_df.empty:
-                    render_candidate_term(term_df, term_label)
-
-            if monthly_df is not None and not monthly_df.empty:
-                groups: Dict[str, pd.DataFrame] = {}
-                for label, gdf in monthly_df.groupby("bucket_label", sort=False):
-                    groups[str(label)] = gdf
-                for label in sorted(groups, key=lambda lbl: groups[lbl]["expiration"].min()):
-                    render_candidate_term(groups[label], label)
-
-            html_parts.append("</details>")
-
         puts_df = df[df["strategy"] == "PUT"]
         calls_df = df[df["strategy"] == "CALL"]
 
         if not puts_df.empty:
-            render_section(puts_df, "Sell Put Candidates", "section-puts")
+            _render_candidate_section(puts_df, "Sell Put Candidates", "section-puts", html_parts)
         if not calls_df.empty:
-            render_section(calls_df, "Sell Call Candidates", "section-calls",
-                           extra_monthly=monthly_call_candidates or [])
+            _render_candidate_section(calls_df, "Sell Call Candidates", "section-calls", html_parts,
+                                       extra_monthly=monthly_call_candidates or [])
 
-    html_parts.append("<hr>")
-    html_parts.append(
-        "<p><strong>Risk reminders:</strong> Assignment risk, overnight gaps, earnings/event shocks, "
-        "liquidity deterioration, and tail-risk moves can cause losses.</p>"
-    )
-    html_parts.append("</body></html>")
+    html_parts.extend(_html_footer())
 
     html_path.write_text("\n".join(html_parts), encoding="utf-8")
     return str(csv_path), str(html_path)
+
+
+_DARK_PAGE_STYLE = (
+    "<style>"
+    "body{margin:0;padding:28px 24px 64px;background:#0b1220;color:#e2e8f0;"
+    "font-family:-apple-system,'Segoe UI',Arial,sans-serif;}"
+    ".wrap{max-width:1500px;margin:0 auto;}"
+    "h1{font-size:19px;margin:0 0 2px;color:#fff;font-weight:700;}"
+    ".sub{color:#94a3b8;font-size:12.5px;margin:0 0 16px;}"
+    ".note{font-size:12px;color:#cbd5e1;padding:9px 12px;background:rgba(251,191,36,0.08);"
+    "border:1px solid rgba(251,191,36,0.3);border-radius:8px;margin-bottom:16px;}"
+    ".empty{color:#94a3b8;font-size:13px;padding:16px 0;}"
+    ".caption{color:#64748b;font-size:11.5px;margin:8px 2px 0;}"
+    ".foot{margin-top:28px;padding-top:14px;border-top:1px solid rgba(148,163,184,0.16);"
+    "color:#64748b;font-size:11.5px;}"
+    "a{color:inherit;}"
+    "</style>"
+)
+
+
+def _dark_html_head(title: str) -> List[str]:
+    return [
+        "<!DOCTYPE html><html><head><meta charset='utf-8'>",
+        f"<title>{escape(title)}</title>",
+        _DARK_PAGE_STYLE,
+        "</head><body><div class='wrap'>",
+    ]
+
+
+def _dark_html_footer() -> List[str]:
+    return [
+        "<div class='foot'>Assignment risk, overnight gaps, earnings/event shocks, "
+        "liquidity deterioration, and tail-risk moves can cause losses.</div>",
+        "</div></body></html>",
+    ]
+
+
+def write_per_ticker_reports(
+    candidates: List[Dict[str, Any]],
+    config: Dict[str, Any],
+    disclaimer: str,
+    csp_recommendations: Optional[List[Dict[str, Any]]] = None,
+    cc_recommendations: Optional[List[Dict[str, Any]]] = None,
+    monthly_call_candidates: Optional[List[Dict[str, Any]]] = None,
+    cc_tickers: Optional[List[str]] = None,
+    csp_tickers: Optional[List[str]] = None,
+) -> List[str]:
+    """One self-contained HTML file per (ticker, strategy): {output_dir}/{TICKER}-{CALL|CSP}.html.
+
+    Renders the same dark, expiration-grouped table as the Streamlit dashboard's
+    Calls/Puts tabs (agent/reporting/dashboard_table.py), scoped to one ticker.
+    """
+    output_dir = Path(config["output_dir"])
+    output_dir.mkdir(parents=True, exist_ok=True)
+    run_day = date.today().isoformat()
+
+    df = pd.DataFrame(candidates) if candidates else _empty_df()
+    csp_recommendations = csp_recommendations or []
+    cc_recommendations = cc_recommendations or []
+    monthly_call_candidates = monthly_call_candidates or []
+
+    profile_name = str(config.get("active_profile") or "").strip()
+    profile_suffix = f" ({profile_name})" if profile_name else ""
+
+    written: List[str] = []
+
+    for ticker in cc_tickers or []:
+        html_parts: List[str] = []
+        html_parts.extend(_dark_html_head(f"{ticker} Covered Call Report"))
+        html_parts.append(f"<h1>{escape(ticker)} &mdash; Covered Call{escape(profile_suffix)}</h1>")
+        html_parts.append(f"<p class='sub'>{run_day}</p>")
+        html_parts.append(f"<div class='note'>{escape(disclaimer)}</div>")
+
+        t_calls_df = df[(df["ticker"] == ticker) & (df["strategy"] == "CALL")] if not df.empty else pd.DataFrame()
+        t_monthly_df = pd.DataFrame([c for c in monthly_call_candidates if str(c.get("ticker")) == ticker])
+        t_recs_df = pd.DataFrame([r for r in cc_recommendations if str(r.get("ticker")) == ticker])
+
+        combined = build_calls_combined(t_calls_df, t_monthly_df, t_recs_df)
+        if combined.empty:
+            html_parts.append("<p class='empty'>No candidates passed filters today.</p>")
+        else:
+            display = _build_calls_display(combined)
+            html_parts.append(_render_html_table(display, group_by_expiration=True))
+            html_parts.append(
+                f"<p class='caption'>{len(display)} rows &middot; YES/NO = recommendation verdict "
+                "&middot; IVR* = HV-rank proxy (hover for source) &middot; E&#9888; = earnings before expiry</p>"
+            )
+
+        html_parts.extend(_dark_html_footer())
+        path = output_dir / f"{ticker}-CALL.html"
+        path.write_text("\n".join(html_parts), encoding="utf-8")
+        written.append(str(path))
+
+    for ticker in csp_tickers or []:
+        html_parts = []
+        html_parts.extend(_dark_html_head(f"{ticker} Cash-Secured Put Report"))
+        html_parts.append(f"<h1>{escape(ticker)} &mdash; Cash-Secured Put{escape(profile_suffix)}</h1>")
+        html_parts.append(f"<p class='sub'>{run_day}</p>")
+        html_parts.append(f"<div class='note'>{escape(disclaimer)}</div>")
+
+        t_puts_df = df[(df["ticker"] == ticker) & (df["strategy"] == "PUT")] if not df.empty else pd.DataFrame()
+        t_recs_df = pd.DataFrame([r for r in csp_recommendations if str(r.get("ticker")) == ticker])
+
+        combined = build_puts_combined(t_puts_df, t_recs_df)
+        if combined.empty:
+            html_parts.append("<p class='empty'>No candidates passed filters today.</p>")
+        else:
+            display = _build_puts_display(combined)
+            html_parts.append(_render_html_table(display, group_by_expiration=True))
+            html_parts.append(
+                f"<p class='caption'>{len(display)} rows &middot; YES/NO = recommendation verdict "
+                "&middot; IVR* = HV-rank proxy (hover for source) &middot; E&#9888; = earnings before expiry</p>"
+            )
+
+        html_parts.extend(_dark_html_footer())
+        path = output_dir / f"{ticker}-CSP.html"
+        path.write_text("\n".join(html_parts), encoding="utf-8")
+        written.append(str(path))
+
+    return written

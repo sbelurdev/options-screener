@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Options Screener — Data Sources</title>
+<style>
+  :root {
+    --bg: #0b1220;
+    --panel: #111a2e;
+    --border: rgba(148,163,184,0.16);
+    --text: #e2e8f0;
+    --muted: #94a3b8;
+    --accent: #fbbf24;
+    --green: #4ade80;
+    --red: #f87171;
+    --blue: #60a5fa;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 32px 20px 80px;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, "Segoe UI", Arial, sans-serif;
+    line-height: 1.55;
+  }
+  .wrap { max-width: 980px; margin: 0 auto; }
+  h1 { font-size: 26px; margin: 0 0 4px; }
+  .subtitle { color: var(--muted); font-size: 14px; margin: 0 0 28px; }
+  h2 {
+    font-size: 18px; margin: 40px 0 12px; padding-bottom: 8px;
+    border-bottom: 1px solid var(--border); color: #fff;
+  }
+  h3 { font-size: 14px; margin: 22px 0 8px; color: var(--blue); }
+  p { color: #cbd5e1; }
+  code {
+    background: rgba(148,163,184,0.12); padding: 1px 6px; border-radius: 4px;
+    font-family: ui-monospace, Consolas, monospace; font-size: 12.5px; color: var(--accent);
+  }
+  .note {
+    font-size: 12.5px; color: var(--muted); margin: 6px 0 0;
+  }
+  .tag {
+    display: inline-block; font-size: 10.5px; font-weight: 700; letter-spacing: 0.04em;
+    padding: 2px 8px; border-radius: 999px; text-transform: uppercase;
+  }
+  .tag-yf { background: rgba(96,165,250,0.15); color: var(--blue); border: 1px solid rgba(96,165,250,0.4); }
+  .tag-public { background: rgba(74,222,128,0.15); color: var(--green); border: 1px solid rgba(74,222,128,0.4); }
+  .tag-local { background: rgba(251,191,36,0.15); color: var(--accent); border: 1px solid rgba(251,191,36,0.4); }
+  .tag-none { background: rgba(248,113,113,0.15); color: var(--red); border: 1px solid rgba(248,113,113,0.4); }
+  .card {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
+    padding: 18px 20px; margin: 14px 0;
+  }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  @media (max-width: 720px) { .grid2 { grid-template-columns: 1fr; } }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; margin: 10px 0; }
+  th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; }
+  tr:last-child td { border-bottom: none; }
+  .flow {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
+    padding: 18px 20px; font-family: ui-monospace, Consolas, monospace; font-size: 12.5px;
+    color: #cbd5e1; white-space: pre; overflow-x: auto; line-height: 1.6;
+  }
+  ul.gap-list { margin: 8px 0 0; padding-left: 20px; }
+  ul.gap-list li { margin-bottom: 10px; color: #cbd5e1; }
+  ul.gap-list b { color: #fff; }
+  .toc { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 28px; }
+  .toc a {
+    font-size: 12px; color: var(--muted); text-decoration: none; border: 1px solid var(--border);
+    padding: 5px 11px; border-radius: 999px;
+  }
+  .toc a:hover { color: #fff; border-color: rgba(148,163,184,0.4); }
+  footer { margin-top: 50px; padding-top: 16px; border-top: 1px solid var(--border); color: var(--muted); font-size: 12px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <h1>Where the screener's data actually comes from</h1>
+  <p class="subtitle">A field-by-field map of every value the options screener uses: which external source supplies it, what's computed locally, and what no source currently provides at all.</p>
+
+  <div class="toc">
+    <a href="#roles">Provider roles</a>
+    <a href="#yfinance">yfinance</a>
+    <a href="#public">Public.com</a>
+    <a href="#fallback">Fallback behavior</a>
+    <a href="#local">Computed locally</a>
+    <a href="#delta">Delta source chain</a>
+    <a href="#iv">IV / IVR source</a>
+    <a href="#gaps">What we can't get</a>
+  </div>
+
+  <h2 id="roles">Provider roles</h2>
+  <p>Three independent roles, each backed by a provider chosen in config:</p>
+  <table>
+    <thead><tr><th>Role</th><th>Config key</th><th>Options</th><th>Used for</th></tr></thead>
+    <tbody>
+      <tr><td>Options chain</td><td><code>options_data_provider</code></td><td>yfinance <em>or</em> public</td><td>Expirations, strikes, bid/ask, volume, OI, IV, delta/theta</td></tr>
+      <tr><td>Market data</td><td><code>market_data_provider</code></td><td>yfinance only</td><td>Price history (OHLCV) → technicals, support/resistance</td></tr>
+      <tr><td>Fundamentals</td><td><code>fundamentals_provider</code></td><td>yfinance only</td><td>Next earnings date</td></tr>
+    </tbody>
+  </table>
+  <p class="note">Only the options-chain role is swappable; price history and earnings always come from yfinance regardless of config (the code raises an error for any other value there).</p>
+
+  <h2 id="yfinance">yfinance <span class="tag tag-yf">tag-yf</span></h2>
+  <div class="card">
+    <table>
+      <thead><tr><th>Field</th><th>Notes</th></tr></thead>
+      <tbody>
+        <tr><td>Price history (OHLCV, daily)</td><td>Feeds spot price, MA20/MA50, RSI14, HV20, support/resistance levels</td></tr>
+        <tr><td>Options expiration dates</td><td><code>t.options</code></td></tr>
+        <tr><td>Options chain per expiration</td><td><code>contractSymbol</code>, <code>strike</code>, <code>bid</code>, <code>ask</code>, <code>lastPrice</code>, <code>volume</code>, <code>openInterest</code>, <code>impliedVolatility</code></td></tr>
+        <tr><td>Delta</td><td><span class="tag tag-none">not reliable</span> — the delta column exists in yfinance's chain but is rarely populated; treated as unavailable in practice</td></tr>
+        <tr><td>Theta / gamma / vega / rho</td><td><span class="tag tag-none">not provided</span> at all</td></tr>
+        <tr><td>Earnings date</td><td>Tried in order: <code>t.calendar</code> → <code>t.get_earnings_dates()</code>; first future date found, filtered to ETFs/indexes/crypto being skipped since they don't report earnings</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h2 id="public">Public.com <span class="tag tag-public">tag-public</span></h2>
+  <div class="card">
+    <table>
+      <thead><tr><th>Field</th><th>Notes</th></tr></thead>
+      <tbody>
+        <tr><td>Options expiration dates</td><td>Per-underlying, via <code>option-expirations</code></td></tr>
+        <tr><td>Options chain per expiration</td><td>Same shape as yfinance's chain fields</td></tr>
+        <tr><td>Delta</td><td><span class="tag tag-public">from greeks endpoint</span> — dedicated <code>/option-details/&lt;account&gt;/greeks</code> call, real-time</td></tr>
+        <tr><td>Theta</td><td><span class="tag tag-public">from greeks endpoint</span> — same call as delta</td></tr>
+        <tr><td>Implied volatility</td><td>Present in the chain response; greeks endpoint used as a fallback when it's missing there</td></tr>
+        <tr><td>Gamma / vega / rho</td><td><span class="tag tag-none">not extracted</span> — the greeks endpoint may return more, but only delta/theta/IV are read from it in this code</td></tr>
+      </tbody>
+    </table>
+    <p class="note">Requires a <code>PUBLIC_API_KEY</code> env var and an authenticated brokerage account; without one, the app logs a warning and drops to yfinance-only.</p>
+  </div>
+
+  <h2 id="fallback">Fallback behavior (hybrid mode)</h2>
+  <p>Whichever provider is primary, the other is used to patch gaps — never a hard dependency on one source alone:</p>
+  <div class="flow">options_data_provider = "public"  (primary = Public.com)
+────────────────────────────────────────────────
+  Public.com chain empty or errors for a ticker/expiration
+        │
+        ▼
+  Fall back to yfinance for that chain
+  (fallback events collected → shown as a warning banner in the HTML report)
+
+options_data_provider = "yfinance"  (primary = yfinance)
+────────────────────────────────────────────────
+  yfinance is missing an expiration Public.com has (e.g. certain monthly
+  chains) → that specific expiration is fetched from Public.com instead
+        │
+  If PUBLIC_API_KEY is set, delta/theta are also back-filled from Public's
+  greeks endpoint even when the chain itself came from yfinance</div>
+
+  <h2 id="local">Computed locally — never from any provider</h2>
+  <div class="card">
+    <table>
+      <thead><tr><th>Metric</th><th>How</th></tr></thead>
+      <tbody>
+        <tr><td>Spot price</td><td>Last close from price history</td></tr>
+        <tr><td>MA20 / MA50 / RSI14 / HV20</td><td>Rolling stats over daily closes (Wilder's RSI; 20-day annualized stdev for HV)</td></tr>
+        <tr><td>ATM IV snapshot</td><td>Mean IV of the strike nearest spot (call + put side) at the expiry nearest 30 DTE — recorded to a local CSV every run</td></tr>
+        <tr><td>True IV Rank</td><td>Once ≥20 self-recorded daily observations exist: <code>(current IV − 1yr low) / (1yr high − 1yr low) × 100</code></td></tr>
+        <tr><td>IVR fallback (HV-rank proxy)</td><td>Used until enough IV history accumulates: current 20-day HV ranked against its own 1-year range</td></tr>
+        <tr><td>Delta (last-resort fallback)</td><td>Black-Scholes, only if IV + risk-free rate are available; otherwise defaults to 0.0 (logged)</td></tr>
+        <tr><td>Expected fill price</td><td><code>bid + fill_price_factor × (ask − bid)</code> — all yield/profit figures use this, not raw mid</td></tr>
+        <tr><td>Annualized yield, breakeven, %OTM, bid-ask spread %</td><td>Standard formulas over strike/spot/premium/DTE</td></tr>
+        <tr><td>Theta yield</td><td><code>|theta| × 365 / collateral</code> — only computable when theta came from Public; <code>None</code> on pure-yfinance runs</td></tr>
+        <tr><td>VRP (volatility risk premium)</td><td>Option IV ÷ HV20 — how rich the option's implied vol is vs. realized</td></tr>
+        <tr><td>Support / resistance levels</td><td>52-week and 20-day swing highs/lows from price history</td></tr>
+        <tr><td>Candidate score [0–1]</td><td>Weighted blend of income, delta proximity, trend, liquidity, VRP, theta — see <code>config/base.yaml</code> weights</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h2 id="delta">Delta — source priority chain</h2>
+  <div class="flow">1. Public.com greeks API        ← most accurate, real-time
+     ↓ not available
+2. yfinance chain delta column  ← rarely populated in practice
+     ↓ not available
+3. Black-Scholes (local)        ← needs IV + risk_free_rate in config
+     ↓ IV also missing
+4. OTM% range check             ← delta-less fallback, filter only
+     ↓ fails range check
+5. Default 0.0                  ← logged as a warning; contract still kept</div>
+
+  <h2 id="iv">Implied volatility &amp; IV Rank — source priority</h2>
+  <div class="flow">Per-contract IV:
+  Public.com chain response  → Public.com greeks endpoint  → yfinance impliedVolatility column
+
+IV Rank (ticker-level):
+  True IV Rank (self-recorded history, needs ≥20 daily observations)
+     ↓ not enough history yet
+  HV-Rank proxy (current 20-day HV vs. its own 1-year range)</div>
+  <p class="note">No provider — yfinance or Public.com — exposes a historical implied-volatility series. Building an IV Rank without one means recording today's IV every run and accumulating the app's own history over time; there is no shortcut to a "real" IV Rank on day one.</p>
+
+  <h2 id="gaps">What we can't get, from either source</h2>
+  <div class="card">
+    <ul class="gap-list">
+      <li><b>Historical implied volatility.</b> Neither provider offers an IV time series — only a snapshot of today's chain. This is the reason IV Rank has to be self-built from daily snapshots rather than fetched directly.</li>
+      <li><b>Full Greeks.</b> Gamma, vega, and rho are never fetched from any source — only delta and theta (and only when Public.com is available and authenticated).</li>
+      <li><b>Dividend / ex-dividend data.</b> Not pulled from any provider and not used anywhere in scoring or recommendations — including the covered-call assignment-risk implications of an upcoming ex-dividend date.</li>
+      <li><b>True real-time / streaming quotes.</b> yfinance quotes carry an inherent, Yahoo-side delay that isn't documented or guaranteed — this is not a live NBBO feed, and there's no websocket/push data path in either provider integration.</li>
+      <li><b>Analyst ratings or price targets.</b> Not fetched from any source.</li>
+      <li><b>News or sentiment data.</b> Not fetched from any source.</li>
+      <li><b>Short interest / borrow rates.</b> Not fetched from any source.</li>
+      <li><b>Historical options-chain data for backtesting.</b> Provider APIs only expose the <em>current</em> chain. Local raw-chain snapshots (<code>cache/raw_chains/&lt;TICKER&gt;_&lt;CALL|PUT&gt;.csv</code>) only start accumulating history from whenever that logging was added — there's no way to retroactively pull past chains.</li>
+      <li><b>Order book depth / Level 2 data.</b> Only top-of-book bid/ask is available from either provider — no market depth.</li>
+      <li><b>Multi-leg / spread quotes.</b> Both providers return single-leg chains only. Any spread (vertical, iron condor, etc.) pricing would have to be assembled locally from single-leg quotes — not currently done anywhere in this codebase.</li>
+    </ul>
+  </div>
+
+  <footer>
+    Reflects the provider integrations in <code>agent/providers/</code> as of this writing — regenerate this file if <code>yfinance_provider.py</code>, <code>public_provider.py</code>, or <code>factory.py</code> change.
+  </footer>
+
+</div>
+</body>
+</html>

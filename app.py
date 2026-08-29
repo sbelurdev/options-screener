@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+import base64
 import json
 import os
 import subprocess
 import sys
 import tempfile
+import time
+from functools import lru_cache
 from datetime import date, datetime
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Tuple
 
 import pandas as pd
 import streamlit as st
@@ -15,6 +18,22 @@ import yaml
 
 sys.path.insert(0, str(Path(__file__).parent))
 from agent.utils.env import load_dotenv_if_present
+from agent.reporting.dashboard_table import (
+    _BUCKET_LABELS,
+    _NUMERIC_COLS,
+    _TABLE_CSS,
+    _build_calls_display,
+    _build_puts_display,
+    _col,
+    _dte_bucket,
+    _exp_group_label,
+    _fmt_money,
+    _fmt_pct,
+    _pct_from_cell,
+    _render_html_table,
+    build_calls_combined,
+    build_puts_combined,
+)
 load_dotenv_if_present(".env")
 
 BASE_CONFIG_PATH = Path("config/base.yaml")
@@ -84,6 +103,37 @@ def load_run_meta() -> dict:
     return {}
 
 
+def _file_mtime(p) -> float:
+    try:
+        return Path(str(p)).stat().st_mtime
+    except (OSError, TypeError, ValueError):
+        return -1.0
+
+
+def discover_latest_report(cfg: dict) -> dict:
+    """
+    Newest report set in the profile's output dir. Lets the dashboard pick up
+    runs produced outside this session (scheduled/headless) without re-running.
+    """
+    out_dir = Path(str(cfg.get("output_dir") or "./reports"))
+    if not out_dir.exists():
+        return {}
+    csvs = sorted(out_dir.glob("*_options_report.csv"))  # date-prefixed names sort chronologically
+    if not csvs:
+        return {}
+    latest = csvs[-1]
+    day = latest.name.split("_")[0]
+    mtime = latest.stat().st_mtime
+    return {
+        "csv_path": str(latest),
+        "cc_recs_path": str(out_dir / f"{day}_cc_recs.csv"),
+        "csp_recs_path": str(out_dir / f"{day}_csp_recs.csv"),
+        "monthly_calls_path": str(out_dir / f"{day}_monthly_calls.csv"),
+        "timestamp": datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M"),
+        "_mtime": mtime,
+    }
+
+
 # ── UI helpers ─────────────────────────────────────────────────────────────────
 
 def tickers_to_text(tickers: list) -> str:
@@ -126,329 +176,54 @@ def extract_strike_dicts(df: pd.DataFrame) -> tuple[dict, dict]:
 
 
 # ── Data loading + merging ─────────────────────────────────────────────────────
-
-def _fmt_money(val) -> str:
-    try:
-        v = float(val)
-        return f"${v:,.2f}" if not pd.isna(v) else "-"
-    except (TypeError, ValueError):
-        return "-"
-
-
-def _fmt_pct(val, scale: float = 1.0) -> str:
-    try:
-        v = float(val)
-        return f"{v * scale:.1f}%" if not pd.isna(v) else "-"
-    except (TypeError, ValueError):
-        return "-"
-
-
-def _merge_recs(
-    combined: pd.DataFrame,
-    recs: pd.DataFrame,
-    breakeven_field: str = "downside_breakeven",
-) -> None:
-    recs = recs[recs["strike"].notna() & recs["expiration"].notna()]
-    combined["_exp_str"] = combined["expiration"].astype(str)
-
-    for _, rec in recs.iterrows():
-        t = str(rec.get("ticker", ""))
-        exp = str(rec.get("expiration", ""))
-        strike_raw = rec.get("strike")
-        if not t or not exp or pd.isna(strike_raw):
-            continue
-        strike = float(strike_raw)
-        mask = (
-            (combined["ticker"].astype(str) == t)
-            & (combined["_exp_str"] == exp)
-            & combined["strike"].notna()
-            & ((combined["strike"] - strike).abs() < 0.01)
-        )
-        if not mask.any():
-            continue
-        combined.loc[mask, "_rec"] = str(rec.get("recommend", ""))
-        why = str(rec.get("reason", ""))
-        if why:
-            combined.loc[mask, "_why"] = why
-        be = rec.get(breakeven_field)
-        if pd.notna(be):
-            combined.loc[mask, "_breakeven"] = float(be)
-        pm = rec.get("premium")
-        if pd.notna(pm):
-            combined.loc[mask, "_premium"] = float(pm)
-
-    combined.drop(columns=["_exp_str"], inplace=True, errors="ignore")
-
+# _fmt_money/_fmt_pct/table-building live in agent/reporting/dashboard_table.py,
+# shared with the static per-ticker HTML files so both render identically.
 
 def _load_calls_view(
     csv_path: Optional[str],
     monthly_path: Optional[str],
     recs_path: Optional[str],
 ) -> pd.DataFrame:
-    pieces = []
+    candidates_df = pd.DataFrame()
     if csv_path and Path(csv_path).exists():
         df = pd.read_csv(csv_path)
         if "strategy" in df.columns:
-            c = df[df["strategy"] == "CALL"].copy()
-            if not c.empty:
-                pieces.append(c)
+            candidates_df = df[df["strategy"] == "CALL"].copy()
+
+    monthly_df = pd.DataFrame()
     if monthly_path and Path(monthly_path).exists():
-        m = pd.read_csv(monthly_path)
-        if not m.empty:
-            pieces.append(m)
-    if not pieces:
-        return pd.DataFrame()
+        monthly_df = pd.read_csv(monthly_path)
 
-    combined = pd.concat(pieces, ignore_index=True)
-    combined["_rec"] = ""
-    combined["_flags"] = ""
-    combined["_why"] = combined["why_ranked_high"].fillna("") if "why_ranked_high" in combined.columns else ""
-    combined["_breakeven"] = combined["breakeven"].copy() if "breakeven" in combined.columns else pd.Series(dtype=float)
-    combined["_premium"] = combined["mid"].copy() if "mid" in combined.columns else pd.Series(dtype=float)
-
+    recs_df = pd.DataFrame()
     if recs_path and Path(recs_path).exists():
-        recs = pd.read_csv(recs_path)
-        _merge_recs(combined, recs, breakeven_field="downside_breakeven")
-        recs2 = recs[recs["strike"].notna() & recs["expiration"].notna()]
-        combined["_exp_str2"] = combined["expiration"].astype(str)
-        for _, rec in recs2.iterrows():
-            t = str(rec.get("ticker", ""))
-            exp = str(rec.get("expiration", ""))
-            strike_raw = rec.get("strike")
-            if not t or not exp or pd.isna(strike_raw):
-                continue
-            mask = (
-                (combined["ticker"].astype(str) == t)
-                & (combined["_exp_str2"] == exp)
-                & combined["strike"].notna()
-                & ((combined["strike"] - float(strike_raw)).abs() < 0.01)
-            )
-            if not mask.any():
-                continue
-            flags = []
-            if rec.get("near_resistance"):
-                flags.append("▲ resistance")
-            if rec.get("near_round_number"):
-                flags.append("○ round#")
-            if rec.get("below_min_price"):
-                flags.append("⚠ below min")
-            combined.loc[mask, "_flags"] = " ".join(flags)
-        combined.drop(columns=["_exp_str2"], inplace=True, errors="ignore")
+        recs_df = pd.read_csv(recs_path)
 
-    combined["_exp_dt"] = pd.to_datetime(combined["expiration"], errors="coerce")
-    combined = combined.sort_values(["_exp_dt", "strike"], ascending=[True, True]).reset_index(drop=True)
-    combined.drop(columns=["_exp_dt"], inplace=True, errors="ignore")
-    return combined
+    return build_calls_combined(candidates_df, monthly_df, recs_df)
 
 
 def _load_puts_view(
     csv_path: Optional[str],
     recs_path: Optional[str],
 ) -> pd.DataFrame:
-    pieces = []
+    candidates_df = pd.DataFrame()
     if csv_path and Path(csv_path).exists():
         df = pd.read_csv(csv_path)
         if "strategy" in df.columns:
-            p = df[df["strategy"] == "PUT"].copy()
-            if not p.empty:
-                pieces.append(p)
-    if not pieces:
-        return pd.DataFrame()
+            candidates_df = df[df["strategy"] == "PUT"].copy()
 
-    combined = pd.concat(pieces, ignore_index=True)
-    combined["_rec"] = ""
-    combined["_flags"] = ""
-    combined["_why"] = combined["why_ranked_high"].fillna("") if "why_ranked_high" in combined.columns else ""
-    combined["_breakeven"] = combined["breakeven"].copy() if "breakeven" in combined.columns else pd.Series(dtype=float)
-    combined["_premium"] = combined["mid"].copy() if "mid" in combined.columns else pd.Series(dtype=float)
-    combined["_cash_req"] = pd.Series(dtype=float)
-
+    recs_df = pd.DataFrame()
     if recs_path and Path(recs_path).exists():
-        recs = pd.read_csv(recs_path)
-        _merge_recs(combined, recs, breakeven_field="breakeven")
-        recs2 = recs[recs["strike"].notna() & recs["expiration"].notna()]
-        combined["_exp_str2"] = combined["expiration"].astype(str)
-        for _, rec in recs2.iterrows():
-            t = str(rec.get("ticker", ""))
-            exp = str(rec.get("expiration", ""))
-            strike_raw = rec.get("strike")
-            if not t or not exp or pd.isna(strike_raw):
-                continue
-            mask = (
-                (combined["ticker"].astype(str) == t)
-                & (combined["_exp_str2"] == exp)
-                & combined["strike"].notna()
-                & ((combined["strike"] - float(strike_raw)).abs() < 0.01)
-            )
-            if not mask.any():
-                continue
-            cr = rec.get("cash_required")
-            if pd.notna(cr):
-                combined.loc[mask, "_cash_req"] = float(cr)
-            flags = []
-            if rec.get("near_support"):
-                flags.append("▼ support")
-            if rec.get("near_round_number"):
-                flags.append("○ round#")
-            combined.loc[mask, "_flags"] = " ".join(flags)
-        combined.drop(columns=["_exp_str2"], inplace=True, errors="ignore")
+        recs_df = pd.read_csv(recs_path)
 
-    combined["_exp_dt"] = pd.to_datetime(combined["expiration"], errors="coerce")
-    combined = combined.sort_values(["_exp_dt", "strike"], ascending=[True, True]).reset_index(drop=True)
-    combined.drop(columns=["_exp_dt"], inplace=True, errors="ignore")
-    return combined
-
-
-def _dte_num(df: pd.DataFrame) -> pd.Series:
-    if "dte" in df.columns:
-        return df["dte"].apply(lambda x: int(float(x)) if pd.notna(x) else 9999)
-    return pd.Series(9999, index=df.index)
-
-
-def _build_calls_display(df: pd.DataFrame) -> pd.DataFrame:
-    def fmt_otm(row):
-        v = row.get("otm_pct")
-        try:
-            if pd.notna(v):
-                return f"{float(v) * 100:.1f}%"
-        except (TypeError, ValueError):
-            pass
-        s, k = row.get("spot"), row.get("strike")
-        try:
-            if pd.notna(s) and pd.notna(k) and float(s) > 0:
-                return f"{(float(k) - float(s)) / float(s) * 100:.1f}%"
-        except (TypeError, ValueError):
-            pass
-        return "-"
-
-    out = pd.DataFrame({
-        "Rec":         df["_rec"].fillna(""),
-        "Ticker":      df["ticker"].astype(str) if "ticker" in df.columns else "",
-        "AnnualYield": df["annualized_yield"].apply(lambda x: _fmt_pct(x, 100)) if "annualized_yield" in df.columns else "-",
-        "Current":     df["spot"].apply(_fmt_money) if "spot" in df.columns else "-",
-        "Strike":      df["strike"].apply(_fmt_money) if "strike" in df.columns else "-",
-        "%OTM":        df.apply(fmt_otm, axis=1),
-        "Expiration":  df["expiration"].astype(str) if "expiration" in df.columns else "",
-        "DTE":         df["dte"].apply(lambda x: str(int(x)) if pd.notna(x) else "-") if "dte" in df.columns else "-",
-        "Premium":     df["_premium"].apply(_fmt_money),
-        "Delta":       df["delta"].apply(lambda x: f"{abs(float(x)):.3f}" if pd.notna(x) else "-") if "delta" in df.columns else "-",
-        "IVR":         df["ivr"].apply(lambda x: _fmt_pct(x)) if "ivr" in df.columns else "-",
-        "MaxProfit":   df["max_profit"].apply(_fmt_money) if "max_profit" in df.columns else "-",
-        "Breakeven":   df["_breakeven"].apply(_fmt_money),
-        "Flags":       df["_flags"].fillna(""),
-        "Why":         df["_why"].fillna(""),
-    })
-    out["_dte_num"] = _dte_num(df)
-    return out
-
-
-def _build_puts_display(df: pd.DataFrame) -> pd.DataFrame:
-    def fmt_to_strike(row):
-        s, k = row.get("spot"), row.get("strike")
-        try:
-            if pd.notna(s) and pd.notna(k) and float(s) > 0:
-                return f"{(float(k) - float(s)) / float(s) * 100:.1f}%"
-        except (TypeError, ValueError):
-            pass
-        return "-"
-
-    out = pd.DataFrame({
-        "Rec":         df["_rec"].fillna(""),
-        "Ticker":      df["ticker"].astype(str) if "ticker" in df.columns else "",
-        "AnnualYield": df["annualized_yield"].apply(lambda x: _fmt_pct(x, 100)) if "annualized_yield" in df.columns else "-",
-        "Current":     df["spot"].apply(_fmt_money) if "spot" in df.columns else "-",
-        "Strike":      df["strike"].apply(_fmt_money) if "strike" in df.columns else "-",
-        "%ToStrike":   df.apply(fmt_to_strike, axis=1),
-        "Expiration":  df["expiration"].astype(str) if "expiration" in df.columns else "",
-        "DTE":         df["dte"].apply(lambda x: str(int(x)) if pd.notna(x) else "-") if "dte" in df.columns else "-",
-        "Premium":     df["_premium"].apply(_fmt_money),
-        "Delta":       df["delta"].apply(lambda x: f"{abs(float(x)):.3f}" if pd.notna(x) else "-") if "delta" in df.columns else "-",
-        "IVR":         df["ivr"].apply(lambda x: _fmt_pct(x)) if "ivr" in df.columns else "-",
-        "MaxProfit":   df["max_profit"].apply(_fmt_money) if "max_profit" in df.columns else "-",
-        "Breakeven":   df["_breakeven"].apply(_fmt_money),
-        "CashRqd":     df["_cash_req"].apply(_fmt_money),
-        "Why":         df["_why"].fillna(""),
-    })
-    out["_dte_num"] = _dte_num(df)
-    return out
+    return build_puts_combined(candidates_df, recs_df)
 
 
 # ── Display ────────────────────────────────────────────────────────────────────
-
-_BUCKET_LABELS = ["0–14 days", "15–45 days", "Long term (46d+)"]
-
-
-def _dte_bucket(n: int) -> str:
-    if n <= 14:
-        return "0–14 days"
-    if n <= 45:
-        return "15–45 days"
-    return "Long term (46d+)"
+# _dte_bucket/_NUMERIC_COLS/_TABLE_CSS/_render_html_table etc. are imported from
+# agent/reporting/dashboard_table.py (see top of file).
 
 
-def _render_html_table(display_df: pd.DataFrame) -> str:
-    from html import escape as _esc
-    if display_df.empty:
-        return "<em style='color:inherit;opacity:0.6;'>No data available for the selected filters.</em>"
-
-    exps = sorted(display_df["Expiration"].unique()) if "Expiration" in display_df.columns else []
-    exp_alt = {exp: (i % 2 == 1) for i, exp in enumerate(exps)}
-
-    # visible columns only
-    cols = [c for c in display_df.columns if not c.startswith("_")]
-
-    css = (
-        "<style>"
-        ".ot{border-collapse:collapse;width:100%;font-size:12.5px;"
-        "font-family:ui-monospace,'Segoe UI Mono',Consolas,monospace;}"
-        ".ot th{padding:5px 10px;text-align:left;"
-        "border-bottom:2px solid rgba(128,128,128,0.35);"
-        "white-space:nowrap;font-weight:600;font-size:12px;"
-        "background:rgba(128,128,128,0.12);}"
-        ".ot td{padding:4px 10px;"
-        "border-bottom:1px solid rgba(128,128,128,0.1);"
-        "white-space:nowrap;vertical-align:top;}"
-        ".ot tr.ry td{background:#1e7e4e !important;color:#cff5dd !important;}"
-        ".ot tr.rn td{background:#9b2027 !important;color:#f8d7da !important;}"
-        ".ot tr.ra td{background:rgba(110,130,200,0.09);}"
-        ".ot td.wc{white-space:normal;min-width:160px;max-width:300px;"
-        "font-size:11px;line-height:1.35;}"
-        ".ot td.fc{font-size:11px;opacity:0.85;}"
-        "</style>"
-    )
-
-    parts = [css, "<table class='ot'><thead><tr>"]
-    for col in cols:
-        parts.append(f"<th>{_esc(col)}</th>")
-    parts.append("</tr></thead><tbody>")
-
-    for _, row in display_df.iterrows():
-        rec = str(row.get("Rec", "")).strip()
-        exp = str(row.get("Expiration", ""))
-        if rec == "Yes":
-            cls = "ry"
-        elif rec == "No":
-            cls = "rn"
-        elif exp_alt.get(exp, False):
-            cls = "ra"
-        else:
-            cls = ""
-        parts.append(f"<tr class='{cls}'>")
-        for col in cols:
-            cell = _esc(str(row.get(col, "") if row.get(col, "") is not None else ""))
-            if col == "Why":
-                parts.append(f"<td class='wc'>{cell}</td>")
-            elif col == "Flags":
-                parts.append(f"<td class='fc'>{cell}</td>")
-            else:
-                parts.append(f"<td>{cell}</td>")
-        parts.append("</tr>")
-
-    parts.append("</tbody></table>")
-    return "".join(parts)
-
-
-def _show_tab(display_df: pd.DataFrame, key_prefix: str) -> None:
+def _show_tab(display_df: pd.DataFrame, key_prefix: str, data_version: str = "") -> None:
     if display_df.empty:
         st.info("No data available.")
         return
@@ -462,24 +237,161 @@ def _show_tab(display_df: pd.DataFrame, key_prefix: str) -> None:
             bucket_counts[_dte_bucket(int(n))] += 1
     available_buckets = [b for b in _BUCKET_LABELS if bucket_counts[b] > 0]
 
-    f1, f2 = st.columns(2)
-    sel_tickers = f1.multiselect("Ticker", all_tickers, default=all_tickers, key=f"{key_prefix}_tickers")
+    # Widget keys are namespaced by data_version (the loaded report's run
+    # timestamp) so a fresh run gets fresh filter widgets. Streamlit only
+    # honors `default=` the first time a given key is created — on every
+    # later rerun it silently restores whatever was last selected for that
+    # key instead, so without this a new run's data would keep being
+    # filtered by stale selections from the previous report (or from a
+    # different profile) rather than showing everything by default.
+    version_tag = "".join(ch for ch in str(data_version) if ch.isalnum()) or "v0"
+    widget_ns = f"{key_prefix}_{version_tag}"
+
+    f1, f2, f3, f4 = st.columns([2, 2, 1.2, 0.9])
+    sel_tickers = f1.multiselect("Ticker", all_tickers, default=all_tickers, key=f"{widget_ns}_tickers")
     sel_buckets = f2.multiselect(
         "Expiration range",
         available_buckets,
         default=available_buckets,
-        key=f"{key_prefix}_buckets",
+        key=f"{widget_ns}_buckets",
     )
+    sort_by = f3.selectbox(
+        "Sort by",
+        ["Expiration (default)", "Annual Yield ↓", "Score ↓", "Premium ↓", "Delta ↑", "DTE ↑"],
+        key=f"{widget_ns}_sort",
+    )
+    f4.write("")  # vertical alignment with the labelled controls
+    yes_only = f4.toggle("✓ YES only", key=f"{widget_ns}_yesonly")
 
     mask = pd.Series(True, index=display_df.index)
     if "Ticker" in display_df.columns:
         mask &= display_df["Ticker"].isin(sel_tickers)
     if "_dte_num" in display_df.columns and sel_buckets:
         mask &= display_df["_dte_num"].apply(lambda n: _dte_bucket(int(n)) in sel_buckets)
+    if yes_only and "Rec" in display_df.columns:
+        mask &= display_df["Rec"].astype(str).str.strip() == "Yes"
 
     view = display_df[mask].reset_index(drop=True)
-    st.html(_render_html_table(view))
-    st.caption(f"{len(view)} rows — 🟢 Yes · 🔴 No · alternating tint = expiration group")
+
+    _SORT_KEYS = {
+        "Annual Yield ↓": ("_yield_num", False),
+        "Score ↓": ("_score_num", False),
+        "Premium ↓": ("_prem_num", False),
+        "Delta ↑": ("_delta_num", True),
+        "DTE ↑": ("_dte_num", True),
+    }
+    custom_sorted = sort_by in _SORT_KEYS
+    if custom_sorted:
+        col, asc = _SORT_KEYS[sort_by]
+        if col in view.columns:
+            view = view.sort_values(col, ascending=asc).reset_index(drop=True)
+
+    # Expiration group headers only make sense in expiration order
+    st.html(_render_html_table(view, group_by_expiration=not custom_sorted))
+    st.caption(
+        f"{len(view)} rows · YES/NO = recommendation verdict · banded rows = alternating "
+        "expiration groups · IVR* = HV-rank proxy (hover for source) · E⚠ = earnings before expiry"
+    )
+
+
+# ── Performance tab ────────────────────────────────────────────────────────────
+
+def _show_performance(cfg: dict) -> None:
+    """Outcome ledger summary + ATM IV history, independent of the last run."""
+    tracking = cfg.get("outcome_tracking") or {}
+    ledger_path = Path(str(tracking.get("path") or "./cache/outcomes.csv"))
+    iv_path = Path(str(cfg.get("iv_history_path") or "./cache/iv_history.csv"))
+
+    ledger = pd.read_csv(ledger_path) if ledger_path.exists() else pd.DataFrame()
+
+    if ledger.empty:
+        st.info("No recommendations recorded yet — the outcome ledger fills in as runs complete.")
+    else:
+        open_df = ledger[ledger["status"] == "open"].copy()
+        closed = ledger[ledger["status"] == "closed"].copy()
+        graded = closed[closed["outcome"].isin(["expired_otm", "assigned", "called_away"])].copy()
+
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Open positions", len(open_df))
+        m2.metric("Closed (graded)", len(graded))
+        kept_rate = (graded["outcome"] == "expired_otm").mean() if len(graded) else None
+        m3.metric("Premium-kept rate", f"{kept_rate:.0%}" if kept_rate is not None else "—",
+                  help="Share of graded recommendations that expired OTM (full premium kept)")
+        total_pnl = pd.to_numeric(graded["option_pnl"], errors="coerce").sum() if len(graded) else 0.0
+        m4.metric("Option P&L (closed)", f"${total_pnl:,.0f}",
+                  help="Mark-to-expiry, option leg only — ignores rolls and early assignment")
+
+        if len(graded):
+            st.caption("By strategy and verdict — do the screener's Yes calls beat its No calls?")
+            grp = (
+                graded.groupby(["strategy", "verdict"])
+                .agg(
+                    trades=("outcome", "size"),
+                    premium_kept=("outcome", lambda s: (s == "expired_otm").mean()),
+                    total_pnl=("option_pnl", lambda s: pd.to_numeric(s, errors="coerce").sum()),
+                )
+                .reset_index()
+            )
+            grp["premium_kept"] = grp["premium_kept"].apply(lambda x: f"{x:.0%}")
+            grp["total_pnl"] = grp["total_pnl"].apply(lambda x: f"${x:,.0f}")
+            st.dataframe(grp, hide_index=True, use_container_width=True)
+
+            # Cumulative option P&L by expiration, once there's a trend to see
+            pnl_t = graded[["expiration", "option_pnl"]].copy()
+            pnl_t["option_pnl"] = pd.to_numeric(pnl_t["option_pnl"], errors="coerce")
+            pnl_t = pnl_t.dropna().sort_values("expiration")
+            if pnl_t["expiration"].nunique() >= 2:
+                cum = pnl_t.groupby("expiration")["option_pnl"].sum().cumsum()
+                cum.name = "Cumulative option P&L ($)"
+                st.line_chart(cum)
+
+        col_open, col_closed = st.columns(2)
+        with col_open:
+            st.subheader("Open")
+            if open_df.empty:
+                st.caption("None")
+            else:
+                open_df["days_left"] = (
+                    pd.to_datetime(open_df["expiration"], errors="coerce") - pd.Timestamp(date.today())
+                ).dt.days
+                show = open_df[["run_date", "strategy", "ticker", "term", "verdict",
+                                "expiration", "days_left", "strike", "premium", "delta"]]
+                st.dataframe(show.sort_values("expiration"), hide_index=True, use_container_width=True)
+        with col_closed:
+            st.subheader("Closed")
+            if graded.empty:
+                st.caption("None graded yet")
+            else:
+                show = graded[["run_date", "strategy", "ticker", "term", "verdict",
+                               "expiration", "strike", "premium", "expiry_close",
+                               "outcome", "option_pnl"]]
+                st.dataframe(show.sort_values("expiration", ascending=False),
+                             hide_index=True, use_container_width=True)
+
+    st.divider()
+    st.subheader("ATM IV history")
+    st.caption(
+        "One snapshot per ticker per run day (strike nearest spot, expiry nearest 30 DTE). "
+        "True IV Rank replaces the HV-rank proxy once ~20 observations accumulate."
+    )
+    iv = pd.read_csv(iv_path) if iv_path.exists() else pd.DataFrame()
+    if iv.empty:
+        st.info("No IV snapshots recorded yet.")
+        return
+    pivot = iv.pivot_table(index="date", columns="ticker", values="atm_iv")
+    st.line_chart(pivot * 100.0, y_label="ATM IV %")
+    latest = (
+        iv.sort_values("date")
+        .groupby("ticker")
+        .agg(observations=("atm_iv", "size"),
+             current_iv=("atm_iv", "last"),
+             low=("atm_iv", "min"),
+             high=("atm_iv", "max"))
+        .reset_index()
+    )
+    for col in ("current_iv", "low", "high"):
+        latest[col] = latest[col].apply(lambda x: f"{x * 100:.0f}%")
+    st.dataframe(latest, hide_index=True, use_container_width=True)
 
 
 # ── Schedule helpers ───────────────────────────────────────────────────────────
@@ -539,11 +451,175 @@ def _schedule_watcher() -> None:
 # ── Page setup ─────────────────────────────────────────────────────────────────
 
 st.set_page_config(
-    page_title="Options Screener",
+    page_title="PremiumEdge",
     page_icon="📈",
     layout="wide",
     initial_sidebar_state="collapsed",
 )
+
+
+# ── Hero banner ────────────────────────────────────────────────────────────────
+
+# Drop a finance image at any of these paths to use it as the hero background
+# (a dark gradient is layered on top so the title stays readable). Without one,
+# the built-in SVG candlestick scene is used.
+_HERO_IMG_CANDIDATES = (
+    Path("assets/hero_bg.jpg"),
+    Path("assets/hero_bg.jpeg"),
+    Path("assets/hero_bg.png"),
+)
+# Background image for the controls zone (Run/profile/Configure). First match wins.
+_CONTROLS_BG_CANDIDATES = (
+    Path("config/Wall Street Bull Image.png"),
+    Path("assets/controls_bg.jpg"),
+    Path("assets/controls_bg.png"),
+)
+
+
+@lru_cache(maxsize=8)
+def _optimized_image_b64(path_str: str, mtime: float, cache_name: str) -> str:
+    """Base64 of an image, downscaled once via Pillow (cache keyed by mtime)."""
+    src = Path(path_str)
+    try:
+        from PIL import Image
+
+        opt = Path("assets") / cache_name
+        opt.parent.mkdir(exist_ok=True)
+        if not opt.exists() or opt.stat().st_mtime < mtime:
+            img = Image.open(src).convert("RGB")
+            img.thumbnail((1800, 1200))
+            img.save(opt, "JPEG", quality=72)
+        data = opt.read_bytes()
+    except Exception:
+        data = src.read_bytes()
+    return base64.b64encode(data).decode("ascii")
+
+
+def _controls_zone_css() -> str:
+    """
+    CSS giving the controls zone (Run/profile + Configure expander) a finance
+    image background. background-size:cover with a fixed focal point handles
+    the expander collapsing/expanding: the zone's height changes, and the
+    image simply reveals more or less of itself — no JS, no reflow artifacts.
+    """
+    for p in _CONTROLS_BG_CANDIDATES:
+        if p.exists():
+            b64 = _optimized_image_b64(str(p), p.stat().st_mtime, ".controls_bg_optimized.jpg")
+            return (
+                "<style>"
+                ".st-key-pe-controls{"
+                "border:1px solid rgba(148,163,184,0.18);border-radius:14px;"
+                "padding:16px 18px 14px 18px;margin-bottom:14px;"
+                # Left-heavy gradient: controls live on the left, the bull and
+                # ticker numbers stay visible on the right.
+                "background-image:linear-gradient(100deg,rgba(8,12,24,0.94) 0%,"
+                "rgba(8,12,24,0.86) 40%,rgba(10,16,30,0.55) 100%),"
+                f"url(data:image/jpeg;base64,{b64});"
+                "background-repeat:no-repeat,no-repeat;"
+                "background-size:cover,cover;"
+                # Focal point ~30% from the top keeps the rising arrow and the
+                # ticker board in frame even when collapsed to a slim strip.
+                "background-position:center,center 30%;}"
+                # Let the image shimmer through the expander instead of a solid block
+                ".st-key-pe-controls [data-testid='stExpander'] details{"
+                "background:rgba(11,18,32,0.62);"
+                "border:1px solid rgba(148,163,184,0.22);border-radius:12px;}"
+                "</style>"
+            )
+    return ""
+
+
+def _hero_background() -> Tuple[str, str, str]:
+    """(background-image layers, positions, sizes) for the hero banner."""
+    for p in _HERO_IMG_CANDIDATES:
+        if p.exists():
+            b64 = _optimized_image_b64(str(p), p.stat().st_mtime, ".hero_bg_optimized.jpg")
+            layers = (
+                "linear-gradient(90deg,rgba(8,12,24,0.95) 0%,rgba(8,12,24,0.78) 40%,rgba(8,12,24,0.38) 100%),"
+                f"url(data:image/jpeg;base64,{b64})"
+            )
+            return layers, "center,center 30%", "auto,cover"
+    layers = (
+        f"url(data:image/svg+xml;base64,{_hero_svg_b64()}),"
+        "linear-gradient(115deg,#0b1220 0%,#13203c 55%,#0d1526 100%)"
+    )
+    return layers, "right center,center", "auto 100%,cover"
+
+
+def _hero_svg_b64() -> str:
+    """Deterministic candlestick walk + trend line, embedded as base64 SVG."""
+    import random
+
+    rng = random.Random(7)
+    candles, closes = [], []
+    y = 118.0
+    for i in range(15):
+        x = 620 + i * 38
+        o = y
+        c = y + rng.randint(-20, 13)  # downward bias in y = upward price drift
+        c = max(24.0, min(140.0, c))
+        hi = min(o, c) - rng.randint(5, 14)
+        lo = max(o, c) + rng.randint(5, 14)
+        color = "#22c55e" if c < o else "#ef4444"
+        top, height = min(o, c), max(abs(c - o), 2.5)
+        candles.append(
+            f"<line x1='{x + 6}' y1='{hi:.0f}' x2='{x + 6}' y2='{lo:.0f}' stroke='{color}' stroke-width='1.5'/>"
+            f"<rect x='{x}' y='{top:.0f}' width='12' height='{height:.0f}' fill='{color}' rx='1.5'/>"
+        )
+        closes.append((x + 6, c))
+        y = c
+
+    trend = " ".join(f"{px},{py - 16:.0f}" for px, py in closes)
+    grid = "".join(
+        f"<line x1='0' y1='{gy}' x2='1200' y2='{gy}' stroke='rgba(148,163,184,0.08)' stroke-width='1'/>"
+        for gy in (40, 80, 120)
+    ) + "".join(
+        f"<line x1='{gx}' y1='0' x2='{gx}' y2='160' stroke='rgba(148,163,184,0.05)' stroke-width='1'/>"
+        for gx in range(100, 1200, 100)
+    )
+    svg = (
+        "<svg xmlns='http://www.w3.org/2000/svg' width='1200' height='160' viewBox='0 0 1200 160'>"
+        f"{grid}<g opacity='0.4'>{''.join(candles)}</g>"
+        f"<polyline points='{trend}' fill='none' stroke='#f97316' stroke-width='2.5' "
+        "stroke-linecap='round' stroke-linejoin='round' opacity='0.85'/>"
+        "</svg>"
+    )
+    return base64.b64encode(svg.encode("utf-8")).decode("ascii")
+
+
+def _render_hero(last_run_ts: Optional[str], duration_s: Optional[float] = None) -> str:
+    if last_run_ts:
+        meta = f"Last run: {last_run_ts}"
+        if duration_s:
+            meta += f" · {duration_s:.0f}s"
+    else:
+        meta = "No runs yet today"
+    bg_layers, bg_pos, bg_size = _hero_background()
+    return (
+        "<style>"
+        ".pe-hero{position:relative;border-radius:14px;overflow:hidden;"
+        "padding:20px 28px 16px 28px;margin-bottom:12px;"
+        "border:1px solid rgba(148,163,184,0.18);"
+        f"background-image:{bg_layers};"
+        "background-repeat:no-repeat,no-repeat;"
+        f"background-position:{bg_pos};background-size:{bg_size};}}"
+        ".pe-title{font-size:36px;font-weight:800;letter-spacing:-0.5px;line-height:1.05;"
+        "font-style:italic;display:inline-block;"
+        "background:linear-gradient(90deg,#f8fafc 0%,#fcd34d 55%,#f97316 100%);"
+        "-webkit-background-clip:text;background-clip:text;"
+        "-webkit-text-fill-color:transparent;color:transparent;}"
+        ".pe-tag{color:#94a3b8;font-size:12px;letter-spacing:0.22em;"
+        "text-transform:uppercase;margin-top:2px;}"
+        ".pe-meta{position:absolute;right:24px;bottom:14px;color:#64748b;"
+        "font-size:11.5px;letter-spacing:0.04em;}"
+        "</style>"
+        "<div class='pe-hero'>"
+        "<div class='pe-title'>📈 PremiumEdge</div>"
+        "<div class='pe-tag'>Find the richest premium, risk-adjusted &nbsp;·&nbsp; "
+        "covered calls &amp; cash-secured puts</div>"
+        f"<div class='pe-meta'>{meta}</div>"
+        "</div>"
+    )
 
 st.markdown(
     "<style>"
@@ -551,6 +627,18 @@ st.markdown(
     "[data-testid='stSidebarCollapsedControl']{display:none !important;}"
     ".block-container{padding-top:0.6rem !important;padding-bottom:1rem !important;}"
     "#MainMenu,footer,header{visibility:hidden;height:0;}"
+    # Tabs: brand-orange active state and underline
+    ".stTabs [data-baseweb='tab-list']{gap:6px;border-bottom:1px solid rgba(148,163,184,0.18);}"
+    ".stTabs [data-baseweb='tab']{font-weight:600;letter-spacing:0.02em;padding:6px 14px;}"
+    ".stTabs [aria-selected='true']{color:#f97316 !important;}"
+    ".stTabs [data-baseweb='tab-highlight']{background-color:#f97316;}"
+    # KPI metric cards
+    "[data-testid='stMetric']{background:rgba(30,41,59,0.45);"
+    "border:1px solid rgba(148,163,184,0.16);border-radius:12px;"
+    "padding:10px 14px 8px 14px;}"
+    "[data-testid='stMetricLabel']{font-size:11px;letter-spacing:0.06em;"
+    "text-transform:uppercase;color:#94a3b8;}"
+    "[data-testid='stMetricDelta']{font-size:11.5px;}"
     "</style>",
     unsafe_allow_html=True,
 )
@@ -563,6 +651,7 @@ for key, default in [
     ("last_csp_recs_path", None),
     ("last_monthly_calls_path", None),
     ("last_run_timestamp", None),
+    ("last_run_duration", None),
     ("is_running", False),
     ("should_run", False),
     ("pending_run_config", None),
@@ -582,20 +671,48 @@ if st.session_state.last_run_ok is None:
         st.session_state.last_csp_recs_path = _meta.get("csp_recs_path")
         st.session_state.last_monthly_calls_path = _meta.get("monthly_calls_path")
         st.session_state.last_run_timestamp = _meta.get("timestamp")
+        st.session_state.last_run_duration = _meta.get("duration_s")
 
 
 # ── Top bar ────────────────────────────────────────────────────────────────────
 
 profiles = get_profiles()
 default_profile = os.getenv("OPTIONS_SCREENER_PROFILE", profiles[0] if profiles else "")
+_boot_profile = st.session_state.get("profile_sel") or default_profile
 
-col_run, col_profile, col_title, _col_pad = st.columns([0.7, 1.5, 4, 1.5])
+# Pick up reports produced outside this session (scheduled/headless runs) so the
+# dashboard shows the latest data without pressing Run.
+if not st.session_state.is_running:
+    _disk = discover_latest_report(load_merged_config(_boot_profile))
+    if _disk and _disk["_mtime"] > _file_mtime(st.session_state.last_csv_path):
+        st.session_state.last_run_ok = True
+        st.session_state.last_csv_path = _disk["csv_path"]
+        st.session_state.last_cc_recs_path = _disk["cc_recs_path"]
+        st.session_state.last_csp_recs_path = _disk["csp_recs_path"]
+        st.session_state.last_monthly_calls_path = _disk["monthly_calls_path"]
+        st.session_state.last_run_timestamp = _disk["timestamp"]
+        st.session_state.last_run_duration = None
+
+st.markdown(
+    _render_hero(st.session_state.last_run_timestamp, st.session_state.last_run_duration),
+    unsafe_allow_html=True,
+)
+
+# Controls zone: Run/profile row + Configure expander share one keyed container
+# so the finance background spans both and flexes with the expander state.
+_zone_css = _controls_zone_css()
+if _zone_css:
+    st.markdown(_zone_css, unsafe_allow_html=True)
+_controls = st.container(key="pe-controls")
+
+col_run, col_profile, _col_pad = _controls.columns([0.7, 1.5, 5.5])
 
 profile = col_profile.selectbox(
     "Profile",
     options=profiles,
     index=profiles.index(default_profile) if default_profile in profiles else 0,
     label_visibility="collapsed",
+    key="profile_sel",
 )
 st.session_state._active_profile = profile
 
@@ -630,21 +747,6 @@ if _sched_cfg_top.get("enabled") and _sched_cfg_top.get("times"):
             unsafe_allow_html=True,
         )
 
-ts = st.session_state.last_run_timestamp
-ts_line = (
-    f"<div style='font-size:11px;color:#6b7280;margin-top:5px;letter-spacing:0.02em;'>"
-    f"Last run: {ts}</div>"
-) if ts else ""
-col_title.markdown(
-    f"<div style='text-align:center;padding-top:0.1rem;'>"
-    f"<span style='font-size:30px;font-weight:800;font-style:italic;color:#f1f5f9;letter-spacing:-0.4px;"
-    f"border-bottom:3px solid #f97316;padding-bottom:4px;'>"
-    f"📈 Options Screener</span>"
-    f"{ts_line}"
-    f"</div>",
-    unsafe_allow_html=True,
-)
-
 cfg = load_merged_config(profile)
 cc_cfg = cfg.get("cc_recommendation", {})
 
@@ -652,7 +754,7 @@ _schedule_watcher()
 
 # ── Config expander ────────────────────────────────────────────────────────────
 
-with st.expander("⚙️ Configure", expanded=False):
+with _controls.expander("⚙️ Configure", expanded=False):
     col_cc, col_csp, col_settings = st.columns([5, 3, 2])
 
     with col_cc:
@@ -782,29 +884,46 @@ if run_clicked and not st.session_state.is_running:
 if st.session_state.is_running:
     st.info("⏳ Pipeline running — showing previous results, will refresh when complete…")
 
-if st.session_state.last_run_ok:
-    tab_calls, tab_puts = st.tabs(["📈 Calls", "📉 Puts"])
-
-    with tab_calls:
-        calls_raw = _load_calls_view(
-            st.session_state.last_csv_path,
-            st.session_state.last_monthly_calls_path,
-            st.session_state.last_cc_recs_path,
-        )
-        calls_display = _build_calls_display(calls_raw) if not calls_raw.empty else pd.DataFrame()
-        _show_tab(calls_display, "calls")
-
-    with tab_puts:
-        puts_raw = _load_puts_view(
-            st.session_state.last_csv_path,
-            st.session_state.last_csp_recs_path,
-        )
-        puts_display = _build_puts_display(puts_raw) if not puts_raw.empty else pd.DataFrame()
-        _show_tab(puts_display, "puts")
-
-elif st.session_state.last_run_ok is False and not st.session_state.is_running:
+if st.session_state.last_run_ok is False and not st.session_state.is_running:
     with st.expander("📝 Log", expanded=True):
         st.code(st.session_state.last_run_log or "(no log)", language=None)
+
+calls_raw = pd.DataFrame()
+puts_raw = pd.DataFrame()
+if st.session_state.last_run_ok:
+    calls_raw = _load_calls_view(
+        st.session_state.last_csv_path,
+        st.session_state.last_monthly_calls_path,
+        st.session_state.last_cc_recs_path,
+    )
+    puts_raw = _load_puts_view(
+        st.session_state.last_csv_path,
+        st.session_state.last_csp_recs_path,
+    )
+
+tab_calls, tab_puts, tab_perf = st.tabs(["📈 Calls", "📉 Puts", "📊 Performance"])
+
+# Ties each tab's filter widgets to the report actually being shown (profile +
+# run) so switching profiles or completing a new run starts filters fresh
+# instead of carrying over a stale ticker/expiration selection — see _show_tab.
+_data_version = f"{profile}_{st.session_state.last_run_timestamp or ''}"
+
+with tab_calls:
+    if st.session_state.last_run_ok:
+        calls_display = _build_calls_display(calls_raw) if not calls_raw.empty else pd.DataFrame()
+        _show_tab(calls_display, "calls", data_version=_data_version)
+    else:
+        st.info("Run the screener to see call candidates.")
+
+with tab_puts:
+    if st.session_state.last_run_ok:
+        puts_display = _build_puts_display(puts_raw) if not puts_raw.empty else pd.DataFrame()
+        _show_tab(puts_display, "puts", data_version=_data_version)
+    else:
+        st.info("Run the screener to see put candidates.")
+
+with tab_perf:
+    _show_performance(cfg)
 
 
 # ── Execute queued run ─────────────────────────────────────────────────────────
@@ -820,6 +939,7 @@ if st.session_state.should_run and st.session_state.pending_run_config is not No
     log_placeholder = st.empty()
     log_lines: list[str] = []
     ok = False
+    run_started = time.time()
     try:
         env = {**os.environ, "PYTHONUNBUFFERED": "1"}
         proc = subprocess.Popen(
@@ -859,7 +979,9 @@ if st.session_state.should_run and st.session_state.pending_run_config is not No
     if ok:
         log_placeholder.empty()
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+        duration_s = round(time.time() - run_started, 1)
         st.session_state.last_run_timestamp = timestamp
+        st.session_state.last_run_duration = duration_s
         save_run_meta({
             "ok": True,
             "csv_path": st.session_state.last_csv_path,
@@ -867,6 +989,7 @@ if st.session_state.should_run and st.session_state.pending_run_config is not No
             "csp_recs_path": st.session_state.last_csp_recs_path,
             "monthly_calls_path": st.session_state.last_monthly_calls_path,
             "timestamp": timestamp,
+            "duration_s": duration_s,
         })
 
     st.rerun()

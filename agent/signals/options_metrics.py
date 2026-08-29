@@ -188,6 +188,9 @@ def build_option_records(
     min_vol = safe_float(config.get("min_volume"))
     max_sp = safe_float(config.get("max_spread_pct"))
     risk_free = safe_float(config.get("risk_free_rate"))
+    # Expected fill as a fraction of the spread above bid (0.5 == mid)
+    fill_factor = safe_float(config.get("fill_price_factor"), 0.5)
+    fill_factor = min(max(float(fill_factor), 0.0), 1.0)
 
     req_cols = [
         "strike",
@@ -257,7 +260,10 @@ def build_option_records(
             continue
 
         mid = (bid + ask) / 2.0
-        ann_yield = annualized_yield(strategy, mid, strike, spot, dte)
+        # Sell limit orders rarely fill at mid — assume only fill_factor of the
+        # spread is captured above bid; all premium-based metrics use this price.
+        fill = bid + fill_factor * (ask - bid)
+        ann_yield = annualized_yield(strategy, fill, strike, spot, dte)
         if ann_yield is None or ann_yield < float(config["min_annualized_yield"]):
             _log_decision(
                 True,
@@ -308,15 +314,30 @@ def build_option_records(
             delta_raw = 0.0
             missing_delta_count += 1
 
+        theta = safe_float(r.get("theta"))
+        # Annualized decay yield: daily theta (income to the seller) per dollar
+        # of collateral — same scale as annualized_yield so they compare directly.
+        collateral_per_share = strike if strategy == "PUT" else spot
+        theta_yield = (
+            abs(theta) * 365.0 / collateral_per_share
+            if theta is not None and collateral_per_share > 0
+            else None
+        )
+
+        # Volatility risk premium: option IV over realised vol. >1 means the
+        # premium is rich relative to how much the stock actually moves.
+        hv20 = safe_float(technicals.get("hv20"))
+        vrp = (iv / hv20) if iv is not None and hv20 is not None and hv20 > 0 else None
+
         earnings_before_expiry = earnings_date is not None and earnings_date <= expiration and earnings_date >= today
 
         # Max profit at expiry (per contract = 100 shares):
         #   PUT  → keep full premium if stock stays above strike
         #   CALL → premium + (strike − spot) upside if assigned at strike
         if strategy == "PUT":
-            max_profit_val = round(mid * 100, 2)
+            max_profit_val = round(fill * 100, 2)
         else:
-            max_profit_val = round((strike - spot + mid) * 100, 2) if spot > 0 else None
+            max_profit_val = round((strike - spot + fill) * 100, 2) if spot > 0 else None
 
         record = {
             "run_date": today.isoformat(),
@@ -331,15 +352,19 @@ def build_option_records(
             "bid": round(bid, 4),
             "ask": round(ask, 4),
             "mid": round(mid, 4),
+            "fill_price": round(fill, 4),
             "spread_pct": round(sp, 6),
             "volume": volume,
             "open_interest": oi,
             "implied_volatility": round(iv, 6) if iv is not None else None,
             "delta": round(delta_raw, 6),
             "delta_source": delta_source,
+            "theta": round(theta, 6) if theta is not None else None,
+            "theta_yield": round(theta_yield, 6) if theta_yield is not None else None,
+            "vrp": round(vrp, 4) if vrp is not None else None,
             "dte": dte,
             "annualized_yield": ann_yield,
-            "breakeven": round(breakeven(strategy, strike, spot, mid), 4),
+            "breakeven": round(breakeven(strategy, strike, spot, fill), 4),
             "max_profit": max_profit_val,
             "otm_pct": round(otm_pct, 6) if otm_pct is not None else None,
             "earnings_date": earnings_date.isoformat() if earnings_date else "",

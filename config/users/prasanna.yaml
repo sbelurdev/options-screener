@@ -1,23 +1,28 @@
 covered_call_tickers:
-  - NVDA
-
+- MSFT
+- NVDA
+- GOOGL
+- CRM
+- NOW
 cc_recommendation:
   min_strike_prices:
-    NVDA: 230  # only show NVDA covered call strikes >= $230
+    MSFT: 500.0
+    NVDA: 225.0
   max_strike_prices:
-    NVDA: 265  # only show NVDA covered call strikes <= $265
-  min_yield: 0.05  # drop all covered call options with annualized yield < 5%
-
+    MSFT: 620.0
+    NVDA: 260.0
+  min_yield: 0.05
+  long_term_months: 12
 cash_secured_put_tickers:
-  - TQQQ
-
+- TQQQ
+- GOOGL
 output_dir: ./reports/prasanna
 log_dir: ./logs/prasanna
 cache_dir: ./cache/prasanna
-
-# Schedule overrides — uncomment and edit to use times different from base.yaml
-# schedule:
-#   enabled: true
-#   times:
-#     - "07:45"
-#     - "12:00"
+options_data_provider: public
+notify_email: Prasanna.Kudli@outlook.com
+schedule:
+  enabled: true
+  times:
+  - 07:45
+  - '12:00'

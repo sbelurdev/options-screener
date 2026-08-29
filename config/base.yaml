@@ -34,7 +34,23 @@ min_open_interest: null
 min_volume: null
 max_spread_pct: null
 html_min_mid_price: 0.5
+fill_price_factor: 0.4  # expected fill = bid + factor × (ask − bid); 0.5 = mid, sellers usually concede some spread
+fetch_max_workers: 4    # tickers fetched concurrently (1 = sequential)
 min_annualized_yield: 0.12
+
+# Composite-score tuning. Weights are normalized by their sum, so they need
+# not add to exactly 1. theta only differentiates when the Public greeks API
+# supplies it (yfinance chains have no theta → neutral 0.5 for that component).
+scoring:
+  weights:
+    income: 0.35     # risk-adjusted yield: annualized yield × (1 − |delta|)
+    delta: 0.20      # proximity to delta_target
+    trend: 0.15      # MA20/MA50/RSI alignment
+    liquidity: 0.10  # spread + open interest + volume
+    vrp: 0.10        # IV/HV20 premium richness (0.8x → 0, 1.6x → 1)
+    theta: 0.10      # annualized theta decay per dollar of collateral
+  delta_target: 0.20      # |delta| the delta component scores highest at
+  income_yield_cap: 1.5   # absolute income axis saturates here (150% annualized)
 risk_free_rate: 0.05
 
 put_otm_pct_min: 0.05
@@ -56,7 +72,7 @@ cc_recommendation:
   min_acceptable_sale_prices: {}
   min_strike_prices: {}   # optional per-ticker minimum strike filter, e.g. NVDA: 250
   max_strike_prices: {}   # optional per-ticker maximum strike filter, e.g. NVDA: 400
-  min_yield: 0.10         # minimum annualized yield — drop all call options below this threshold
+  min_yield: 0.10         # CALL screening yield threshold — when set, this REPLACES the global min_annualized_yield for calls
   long_term_months: 9     # monthly expirations to fetch beyond max_dte (0 = disabled)
 
 csp_recommendation:
@@ -72,6 +88,18 @@ csp_recommendation:
 output_dir: ./reports/shared
 log_dir: ./logs/shared
 cache_dir: ./cache/shared
+
+# Shared across profiles — every scheduled run records one ATM IV snapshot per
+# ticker; once iv_rank_min_history_days observations exist, the true IV Rank
+# replaces the HV-rank proxy in recommendations.
+iv_history_path: ./cache/iv_history.csv
+iv_rank_min_history_days: 20
+
+# Ledger of all CC/CSP recommendations; expired rows are graded against the
+# close on expiration day (expired_otm / assigned / called_away + option P&L).
+outcome_tracking:
+  enabled: true
+  path: ./cache/outcomes.csv
 price_history_period: 1y
 price_history_interval: 1d
 
@@ -80,3 +108,17 @@ schedule:
   times:
     - "07:45"
     - "12:00"
+
+# Shared sending account for report emails (every profile sends "from" this
+# mailbox). SMTP_USER / SMTP_PASSWORD (an app password, not the account's
+# regular login password) must be set as environment variables — see README.
+# To actually receive emails, set `notify_email` in your own
+# config/users/<profile>.yaml; a profile with no notify_email is skipped
+# with a warning, not an error.
+email:
+  enabled: true
+  smtp_host: smtp.gmail.com
+  smtp_port: 587
+  from_address: Prasanna.Kudli@gmail.com
+  smtp_user_env_var: SMTP_USER
+  smtp_password_env_var: SMTP_PASSWORD

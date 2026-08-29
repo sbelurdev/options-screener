@@ -7,7 +7,12 @@ import pandas as pd
 
 
 def compute_technicals(price_df: pd.DataFrame) -> Dict[str, float]:
-    close = price_df["Close"].astype(float).copy()
+    # yfinance can return a NaN close for the current (incomplete) session —
+    # drop those rows so spot and every indicator use the last valid close.
+    close = price_df["Close"].astype(float).dropna().copy()
+    if close.empty:
+        # Spot 0 routes callers into their existing "spot unavailable" handling
+        return {"spot": 0.0, "ma20": 0.0, "ma50": 0.0, "rsi14": 50.0, "hv20": 0.25}
 
     ma20 = close.rolling(20).mean().iloc[-1]
     ma50 = close.rolling(50).mean().iloc[-1]

@@ -28,7 +28,9 @@ An educational options screener that analyses covered call (CC) and cash-secured
 │           │                    │                    │         │
 │           └────────────────────┴────────────────────┘         │
 │                                │                              │
-│                    _process_ticker() × each ticker            │
+│       _process_ticker() × each ticker (ThreadPool,            │
+│       fetch_max_workers concurrent; results merged in          │
+│       config order so reports stay deterministic)              │
 │                                │                              │
 │          ┌─────────────────────┼─────────────────────┐        │
 │          ▼                     ▼                     ▼        │
@@ -42,8 +44,13 @@ An educational options screener that analyses covered call (CC) and cash-secured
 │              ┌─────────────────┴──────────────────┐           │
 │              ▼                                     ▼          │
 │   build_cc_recommendations()          build_csp_recommendations()
+│   (Short/Med/Long + Monthly CC)       (Short/Med/Long)        │
 │              │                                     │          │
 │              └──────────────────┬──────────────────┘          │
+│                                 ▼                             │
+│              record_recommendations() + evaluate_outcomes()   │
+│              (outcome ledger: grade expired recs vs close)    │
+│                                 │                             │
 │                                 ▼                             │
 │                          write_reports()                      │
 │                     (CSV + HTML to ./reports)                 │
@@ -70,7 +77,7 @@ This is the single most important thing to understand about the data pipeline.
 ├─────────────┼───────────────────────────────────────────────────────┤
 │ Public.com  │ Options expiration dates                               │
 │ (primary    │ Options chain per expiration (same fields as above)    │
-│  if key set)│ Delta ← from dedicated greeks API endpoint            │
+│  if key set)│ Delta + Theta ← from dedicated greeks API endpoint    │
 │             │   (/option-details/{account_id}/greeks)               │
 │             │ Implied Volatility ← also from greeks endpoint        │
 │             │   (used as fallback if not in chain response)          │
@@ -85,17 +92,28 @@ This is the single most important thing to understand about the data pipeline.
 │ RSI14                    │ Wilder's RSI on daily returns            │
 │ HV20                     │ 20-day annualised std-dev of returns     │
 ├──────────────────────────┼──────────────────────────────────────────┤
-│ IVR / HV Rank            │ (current HV − hv_low) / (hv_high−hv_low)│
-│                          │ Uses 1-year HV series, never option IV   │
+│ ATM IV snapshot          │ Mean IV of strike nearest spot (call+put)│
+│                          │ from expiry nearest 30 DTE; persisted to │
+│                          │ iv_history.csv each run                  │
+├──────────────────────────┼──────────────────────────────────────────┤
+│ IVR                      │ True IV Rank over recorded IV history    │
+│                          │ once ≥20 obs; until then HV-rank proxy:  │
+│                          │ (current HV − hv_low) / (hv_high−hv_low)│
 ├──────────────────────────┼──────────────────────────────────────────┤
 │ Delta (fallback only)    │ Black-Scholes when not from provider:    │
 │                          │   needs IV + risk_free_rate in config    │
 │                          │   → defaults to 0 if neither available  │
 ├──────────────────────────┼──────────────────────────────────────────┤
-│ Annualized yield         │ (mid × 100) / collateral × (365 / DTE)  │
+│ Expected fill price      │ bid + fill_price_factor × (ask − bid)    │
+│                          │ (default 0.4 — sellers concede spread;   │
+│                          │ all premium metrics below use this)      │
+│ Annualized yield         │ (fill × 100) / collateral × (365 / DTE) │
 │ Breakeven                │ strike − premium (PUT) / spot − premium  │
 │ OTM%                     │ (strike − spot) / spot                   │
 │ Bid-ask spread %         │ (ask − bid) / mid                        │
+│ Theta yield              │ |theta| × 365 / collateral per share     │
+│                          │ (theta from Public greeks; None on yf)   │
+│ VRP                      │ option IV / HV20 — premium richness      │
 ├──────────────────────────┼──────────────────────────────────────────┤
 │ Support levels           │ low_52w, swing_low_20d from price history│
 │ Resistance levels        │ high_52w, swing_high_20d from price hist │
@@ -133,17 +151,34 @@ For every option contract:
   yfinance impliedVolatility column ← always populated by yfinance
 ```
 
-### What IVR Is — and Is Not
+### What IVR Is — Two-Tier: True IV Rank, then HV-Rank Proxy
 
-IVR (shown in the report) is **not** a live IV Rank from a volatility data service. It is a locally-computed **HV Rank** proxy:
+IVR (shown in the report and used in the CSP verdict) comes from a two-tier source:
 
 ```
-  HV series  = rolling 20-day annualised HV over the price history period (1y)
+  TIER 1 — True IV Rank (preferred, from self-recorded IV history)
+  ───────────────────────────────────────────────────────────────
+  Every run records one ATM IV snapshot per ticker into
+  iv_history_path (./cache/iv_history.csv, shared across profiles):
+    - ATM IV  = mean IV of the strike nearest spot (call + put side),
+                taken from the expiration closest to 30 DTE (IV30 style)
+    - One row per (date, ticker); same-day re-runs overwrite
+
+  Once ≥ iv_rank_min_history_days (20) observations exist in the
+  trailing year:
+    IV Rank = (current IV − 1yr low IV) / (1yr high IV − 1yr low IV) × 100
+
+  TIER 2 — HV Rank proxy (fallback while history accumulates)
+  ───────────────────────────────────────────────────────────
+  HV series  = rolling 20-day annualised HV over the price history period
   IVR proxy  = (today's HV − min HV over period) / (max HV − min HV) × 100
 
-  Option IV is shown alongside the HV rank for context but is NOT used
-  in the formula — option IV includes a risk premium above realised HV,
-  which would inflate the rank, especially for leveraged ETFs.
+  Option IV is shown alongside for context but is NOT used in the proxy
+  formula — option IV includes a risk premium above realised HV, which
+  would inflate the rank, especially for leveraged ETFs.
+
+  The ivr_source string in reports identifies which tier produced the
+  value ("true IV rank (N obs; ...)" vs "proxy: HV rank (...)").
 ```
 
 ---
@@ -201,7 +236,8 @@ config: options_data_provider = "public"
                  │  2. On error/empty:      │
                  │     → yfinance fallback  │
                  │     → inject Public      │
-                 │       delta into yf chain│
+                 │       delta + theta      │
+                 │       into yf chain      │
                  │  3. Log fallback events  │
                  │     → HTML warning banner│
                  └─────────────────────────┘
@@ -293,9 +329,13 @@ Options chain (all strikes for one expiration)
   ├─ FILTER 5: Bid-ask spread ≤ max_spread_pct   (if configured)
   │    spread_pct = (ask − bid) / mid
   │
-  ├─ FILTER 6: Annualized yield ≥ min_annualized_yield (12%)
-  │    PUT yield  = (mid × 100) / (strike × 100) × (365 / DTE)
-  │    CALL yield = (mid × 100) / (spot   × 100) × (365 / DTE)
+  ├─ FILTER 6: Annualized yield ≥ threshold
+  │    PUT threshold:  min_annualized_yield (12%)
+  │    CALL threshold: cc_recommendation.min_yield when set (it REPLACES
+  │                    the global for calls), else min_annualized_yield
+  │    fill = bid + fill_price_factor × (ask − bid)   ← expected fill, not mid
+  │    PUT yield  = (fill × 100) / (strike × 100) × (365 / DTE)
+  │    CALL yield = (fill × 100) / (spot   × 100) × (365 / DTE)
   │
   ├─ FILTER 7: Delta / OTM% in configured range
   │    Delta source priority:
@@ -317,24 +357,43 @@ Options chain (all strikes for one expiration)
 Surviving candidates are ranked. Top 5 per bucket per strategy flow to the recommendation engines.
 
 ```
-  score_candidate()  (score.py)
+  score_candidates()  (score.py) — pooled per ticker + strategy
 
-  Score = weighted sum of 4 components, then earnings penalty
+  Score = weighted sum of 6 components, then earnings penalty.
+  Weights, delta target, and income cap are configurable under the
+  scoring: block in config (weights are normalized by their sum).
 
-  ┌───────────────────────────────────────────────────────┐
-  │  Component         Weight  Formula                    │
-  ├───────────────────────────────────────────────────────┤
-  │  Income            40%     log1p(yield) / log1p(1.0)  │
-  │  Delta accuracy    25%     1 − |delta − 0.20| / 0.25  │
-  │                            (target: ±0.20)            │
-  │  Technical trend   20%     PUT/CALL: spot vs MA20/MA50 │
-  │                            penalty if RSI14 > 75      │
-  │  Liquidity         15%     spread + OI + volume       │
-  └───────────────────────────────────────────────────────┘
+  ┌────────────────────────────────────────────────────────────────┐
+  │  Component   Default  Formula                                  │
+  ├────────────────────────────────────────────────────────────────┤
+  │  Income        35%    50/50 blend of:                          │
+  │                       · absolute: log1p(ev_yield)/log1p(cap)   │
+  │                         (cap = income_yield_cap, default 150%) │
+  │                       · percentile of ev_yield within the      │
+  │                         ticker+strategy pool (all expirations) │
+  │                       ev_yield = yield × (1 − |Δ|)             │
+  │                       (|Δ| ≈ P(assignment))                    │
+  │  Delta         20%    1 − |delta − delta_target| / 0.25        │
+  │                       (delta_target default ±0.20)             │
+  │  Trend         15%    PUT/CALL: spot vs MA20/MA50,             │
+  │                       penalty if RSI14 > 75                    │
+  │  Liquidity     10%    spread + OI + volume                     │
+  │  VRP           10%    (IV/HV20 − 0.8) / 0.8, clamped 0–1       │
+  │                       (premium richness vs realised vol;       │
+  │                       0.8x → 0, 1.6x → 1; missing → 0.5)       │
+  │  Theta         10%    log1p(theta_yield)/log1p(cap) where      │
+  │                       theta_yield = |theta| × 365 / collateral │
+  │                       (Public greeks only; missing → 0.5)      │
+  └────────────────────────────────────────────────────────────────┘
                                ×
   Earnings multiplier:   1 − 0.20 (if earnings before expiry)
 
-  Final score: [0, 1]  →  top 5 per bucket kept
+  The income percentile is why scoring is batched: candidates are
+  collected across ALL expirations for a ticker first, then scored as
+  one pool per strategy — this keeps differentiation on leveraged ETFs
+  whose yields all exceed the absolute cap.
+
+  Final score: [0, 1]  →  top 5 per expiration per strategy kept
 ```
 
 ### Technical Trend Score Detail
@@ -361,36 +420,61 @@ Surviving candidates are ranked. Top 5 per bucket per strategy flow to the recom
 
 ```
 Input: top-scored CALL candidates per ticker, split by DTE into 3 pools
+       + optional monthly candidates beyond max_dte
 
   recommend_cc_for_ticker()
   ─────────────────────────
-  Per term (Short-Term DTE≤14 / Medium-Term 15-28 / Long-Term >28):
+  Per standard term (Short-Term DTE≤14 / Medium-Term 15-28 / Long-Term >28):
 
-    1. Sort candidates: delta-qualified first, then by score
-    2. Take top N (max_suggestions_per_term = 3)
-    3. For each selected candidate → verdict:
+    1. Separate candidates into delta-qualified vs out-of-range
+    2. Sort each group by composite score (descending)
+    3. Merge: delta-qualified first, then out-of-range fills remaining slots
+    4. Take top N (max_suggestions_per_term = 3)
+    5. Per selected candidate → VERDICT:
 
-       VERDICT LOGIC (IVR is NOT used here):
-       ┌───────────────────────────────────────────┐
-       │  All of these OK?            → YES        │
-       │    |delta| in 0.10–0.25                   │
-       │    No earnings within 7d of expiry        │
-       │    Strike ≥ min_acceptable_price           │
-       ├───────────────────────────────────────────┤
-       │  Any issue above?            → NO         │
-       │    Shows reason (delta OOB, earnings,     │
-       │    below min price)                       │
-       └───────────────────────────────────────────┘
+       ┌────────────────────────────────────────────────────────┐
+       │  VERDICT LOGIC (IVR is NOT used):                      │
+       │                                                        │
+       │  Collect all issues:                                   │
+       │    Issue A: |delta| outside [delta_min, delta_max]     │
+       │    Issue B: earnings_date ≤ expiry AND                 │
+       │             (expiry − earnings_date) ≤ buffer days     │
+       │    Issue C: strike < min_acceptable_price (if set)     │
+       │                                                        │
+       │  Any issues?  → NO  (reason = joined issue list)       │
+       │  No issues?   → YES (reason includes delta + flags)    │
+       └────────────────────────────────────────────────────────┘
 
-    4. Always ≥1 suggestion per term, even if all are "No"
+    6. Always returns ≥1 row per term; even if all are "No", the best
+       available candidate is shown so the user can review it manually.
 
-  IVR is computed and displayed (HV Rank proxy) but
-  does NOT affect the CC verdict.
+  Computed fields per suggestion:
+    max_profit        = (strike − spot + premium) × 100
+    downside_breakeven = strike + premium   (effective call-away price)
+
+  IVR (true IV Rank when history suffices, else HV Rank proxy) is
+  shown for context — does NOT affect the CC verdict.
 
   Flags shown for context (not verdict-affecting):
-    ▲ resistance  — strike within 2% of 52w high / 20d swing high
-    ○ round#      — strike within 1% of nearest $5 increment
-    ⚠ below $X   — strike below user's cost basis floor
+    near_resistance  — strike within resistance_pct_buffer (2%) of
+                       52w high or 20d swing high
+    near_round_number — strike within 1% of nearest $5 increment
+    below_min_price  — strike < user's min_acceptable_sale_price
+
+Monthly CC (beyond max_dte):
+  ─────────────────────────────────────────────────────────────
+  Fetched via select_monthly_cc_expiration_dates() and processed
+  separately in _recommend_monthly_cc():
+
+    1. Group candidates by expiration date
+    2. Per expiration month, select the single best candidate by
+       RISK-ADJUSTED annualized yield = yield × (1 − |delta|)
+       (primary key) — NOT composite score
+    3. Apply the same verdict logic as standard terms
+    4. term_label set to "Monthly (Mon YYYY)" e.g. "Monthly (Sep 2026)"
+    5. Results appended after Short/Medium/Long-Term rows, sorted by date
+
+  Monthly rows are output one per expiration month found in the data.
 ```
 
 ### Cash-Secured Put Recommender
@@ -403,28 +487,69 @@ Input: top-scored PUT candidates per ticker, split by DTE into 3 pools
   Returns one recommendation per term per ticker (3 total):
     Short-Term (DTE ≤ 14) / Medium-Term (15–28) / Long-Term (>28)
 
-       VERDICT LOGIC:
-       ┌───────────────────────────────────────────┐
-       │  Hard fails (→ NO):                       │
-       │    IVR < 30%  (HV Rank below threshold)   │
-       │    Earnings within 7d of expiry            │
-       │    No delta-qualified strike (0.10–0.25)   │
-       ├───────────────────────────────────────────┤
-       │  Soft flags (→ NO):                       │
-       │    IVR unavailable / at 0% / at 100%      │
-       │    Strike above support level              │
-       ├───────────────────────────────────────────┤
-       │  All checks pass  → YES                   │
-       └───────────────────────────────────────────┘
+  Per term, _recommend_csp_for_term() runs:
+
+  Step A — Resolve IVR for the ticker
+    Preferred: true IV Rank from recorded IV history (ticker-level,
+      computed once in the pipeline and passed in) — see
+      "What IVR Is" section.
+    Fallback:  HV Rank proxy from the term's candidates:
+      current_HV = 20-day annualised HV (most recent)
+      IVR = (current_HV − hv_low) / (hv_high − hv_low) × 100
+      (option IV is noted but NOT used in the proxy formula)
+
+  Step B — Filter candidates
+
+    Primary filter (strict):
+      |delta| in [delta_min, delta_max]   (default 0.10–0.25)
+      AND strike at/below support level   (if use_support_filter = True)
+        where "at/below support" means ANY of:
+          strike ≤ low_52w × (1 + support_buffer)
+          strike ≤ swing_low_20d × (1 + support_buffer)
+          (spot − strike) / spot ≥ 5%   (≥5% OTM)
+
+    Support relaxation fallback:
+      If primary filter yields nothing, retry with delta-only filter
+      (support requirement dropped).  support_relaxed = True is flagged.
+
+    Earnings preference:
+      Earnings proximity is checked against EACH candidate's own
+      expiration (a term pool can mix several expirations).  Candidates
+      clear of earnings are preferred; only if every qualified candidate
+      straddles earnings does the earnings hard-fail apply.
+
+    If still no candidates → return "No" with combined reason from:
+      IVR below threshold (if applicable) + earnings risk + delta issue.
+
+  Step C — Pick best candidate
+    best = max(qualified, key=composite_score)
+
+  Step D — Verdict
+
+       ┌────────────────────────────────────────────────────────┐
+       │  Hard fails (checked first → NO):                      │
+       │    Earnings within earnings_buffer_days of the BEST    │
+       │    candidate's own expiration                          │
+       │    IVR < ivr_min (HV Rank below threshold)             │
+       │                                                        │
+       │  Soft fails (checked if no hard fails → NO):           │
+       │    IVR unavailable (insufficient price history)        │
+       │    IVR at ceiling (100%) — likely overstated           │
+       │    IVR at floor (0%) — current vol may be understated  │
+       │    support_relaxed — strike above support levels       │
+       │                                                        │
+       │  All pass (no hard or soft fails) → YES                │
+       │    reason = "IVR N%; delta D; strike at/below support" │
+       └────────────────────────────────────────────────────────┘
 
   Support levels (from price history):
-    low_52w       — lowest close over the price history period
-    swing_low_20d — 20-day rolling low of lows
+    low_52w       — lowest Low over the price history period
+    swing_low_20d — 20-day rolling minimum of Lows
 
-  IVR proxy (HV Rank):
-    current_HV = 20-day annualised HV (most recent)
-    IVR = (current_HV − hv_low) / (hv_high − hv_low) × 100
-    (option IV is noted but NOT used in the formula)
+  Computed fields:
+    max_profit   = premium × 100
+    breakeven    = strike − premium
+    cash_required = strike × 100
 ```
 
 ---
@@ -477,6 +602,109 @@ Input: top-scored PUT candidates per ticker, split by DTE into 3 pools
 
   Verdict colours:  ■ Yes = green   ■ No = red
   Links: each ticker links to Fidelity options research page
+
+  Candidate tables include analytics columns: VRP (IV/HV20),
+  ThetaYld (annualized decay per $ collateral), Score (composite).
+```
+
+### Streamlit Dashboard (app.py) — "PremiumEdge"
+
+```
+  Hero:      full-width banner — gradient-text title "PremiumEdge" ·
+             tagline · last-run timestamp.
+             Background: assets/hero_bg.jpg|png if present (downscaled
+             once via Pillow, dark gradient overlay for readability);
+             otherwise a built-in deterministic SVG candlestick scene.
+  Controls:  ▶ Run · profile selector · last-run status · next schedule
+             Hero meta shows last-run timestamp + duration.
+             On load, the dashboard adopts the newest
+             *_options_report.csv in the profile's output dir — so
+             scheduled/headless runs appear without pressing Run.
+  Configure: tickers, CC min yield / strike ranges, provider, schedule
+             (saved back to config/users/<profile>.yaml)
+
+  Controls zone background: the Run/profile row and the Configure
+  expander share one keyed st.container (.st-key-pe-controls) carrying
+  a finance image background (config/Wall Street Bull Image.png, or
+  assets/controls_bg.jpg|png; Pillow-optimized + cached).
+  background-size:cover with a fixed focal point means the expander
+  collapsing/expanding just reveals less/more of the image — no JS.
+  Left-heavy gradient overlay keeps controls readable; the expander
+  body is translucent so the image shows through. No image → plain
+  container (no CSS emitted).
+
+  Tabs:
+  ┌─ 📈 Calls / 📉 Puts ────────────────────────────────────────────┐
+  │  Candidate tables sorted by expiration with recommendations     │
+  │  merged inline.                                                 │
+  │  Table visuals:                                                 │
+  │    · expiration group header rows (📅 date · DTE · count) when  │
+  │      in default expiration order (hidden when custom-sorted)    │
+  │    · row banding alternates per expiration group and shows      │
+  │      through verdict tints (continuous group colouring)         │
+  │    · verdicts as YES/NO pill badges + translucent row tint +    │
+  │      green/red left accent stripe (not solid-colour rows)       │
+  │    · numeric columns right-aligned with tabular numerals;       │
+  │      AnnualYield bold amber; row hover highlight                │
+  │    · %OTM/%ToStrike cells carry a micro distance bar            │
+  │      (saturates at 25% OTM)                                     │
+  │    · Delta cells carry a risk dot: green ≤0.15 · amber ≤0.25 ·  │
+  │      red above                                                  │
+  │  Filters: ticker multiselect · DTE bucket · Sort-by dropdown    │
+  │    (Expiration default / AnnualYield / Score / Premium /        │
+  │     Delta / DTE) · "✓ YES only" toggle                          │
+  │  Columns include E⚠ (earnings before expiry), VRP, ΘYld, Score │
+  │  Ticker cells link to Fidelity options research.                │
+  │  IVR cell: hover tooltip shows source; trailing * marks the     │
+  │  HV-rank proxy (vs true IV Rank).                               │
+  ├─ 📊 Performance ────────────────────────────────────────────────┤
+  │  Reads cache/outcomes.csv + cache/iv_history.csv directly       │
+  │  (shown even before the first run of a session).                │
+  │  KPIs: open · closed (graded) · premium-kept rate · option P&L  │
+  │  Breakdown by strategy × verdict (do Yes calls beat No calls?)  │
+  │  Cumulative option P&L line chart (once ≥2 expirations graded)  │
+  │  Open positions (days left) and closed outcomes tables.         │
+  │  ATM IV history line chart per ticker + current/low/high table. │
+  └─────────────────────────────────────────────────────────────────┘
+
+  The scheduler fragment polls every 30 s — auto-runs fire only while
+  the dashboard is open in a browser. For unattended runs use
+  main.py --headless via OS scheduling.
+```
+
+---
+
+## Step 7 — Outcome Tracking
+
+Every run appends the day's CC/CSP recommendations (Yes **and** No verdicts, so
+their relative performance can be compared later) to a CSV ledger, then grades
+any previously recorded rows whose expiration has passed.
+
+```
+  record_recommendations() + evaluate_outcomes()  (tracking/outcomes.py)
+  ──────────────────────────────────────────────────────────────────────
+  Ledger: outcome_tracking.path (./cache/outcomes.csv)
+    One row per (run_date, strategy, ticker, term, expiration, strike)
+    Same-day re-runs replace their earlier rows (upsert)
+    Placeholder rows without a contract (no strike/expiration) skipped
+
+  Grading (each run, for open rows with expiration < today):
+    expiry_close = underlying Close on expiration day
+                   (or last close before it — half-day/holiday tolerance)
+
+    CSP (short put):
+      close ≥ strike → expired_otm   pnl = premium × 100
+      close < strike → assigned      pnl = (close − strike + premium) × 100
+
+    CC (short call, option leg only — share P&L excluded):
+      close ≤ strike → expired_otm   pnl = premium × 100
+      close > strike → called_away   pnl = (premium − (close − strike)) × 100
+
+  P&L is mark-to-expiry per contract, educational only — ignores early
+  assignment, rolls, and fills better/worse than the recorded premium.
+
+  Console summary per run:  N open, M closed, premium-kept rate
+  (premium-kept rate = share of graded rows that expired OTM)
 ```
 
 ---
@@ -487,20 +715,38 @@ Input: top-scored PUT candidates per ticker, split by DTE into 3 pools
 |---|---|---|
 | `covered_call_tickers` | — | Tickers screened for CALL candidates |
 | `cash_secured_put_tickers` | — | Tickers screened for PUT candidates |
-| `delta_call_min/max` | 0.10 / 0.25 | Delta range for CALL screening filter |
-| `delta_put_min/max` | -0.25 / -0.10 | Delta range for PUT screening filter |
+| `delta_call_min/max` | 0.15 / 0.35 | Delta range for CALL screening filter |
+| `delta_put_min/max` | -0.35 / -0.15 | Delta range for PUT screening filter |
 | `max_dte` | 45 | Hard cap — expirations beyond this ignored |
 | `short_term_max_dte` | 14 | DTE ≤ 14 → Short Term (all expirations) |
-| `medium_term_max_dte` | 28 | DTE ≤ 28 → Medium Term (Fridays only) |
-| `min_annualized_yield` | 12% | Contracts below this are dropped |
-| `earnings_risk_penalty` | 20% | Score reduction when earnings before expiry |
+| `medium_term_max_dte` | 28 | DTE ≤ 28 → Medium Term (Fridays only beyond 14) |
+| `min_annualized_yield` | 12% | Contracts below this are dropped (screening filter) |
+| `fill_price_factor` | 0.4 | Expected fill = bid + factor × (ask − bid); basis for all premium metrics (0.5 = mid) |
+| `earnings_risk_penalty` | 20% | Score multiplier reduction when earnings before expiry |
 | `risk_free_rate` | 5% | Used in Black-Scholes delta calculation |
-| `price_history_period` | 1y | Used for MA, RSI, HV, IVR proxy |
+| `price_history_period` | 6mo | Used for MA, RSI, HV, IVR proxy (yfinance period string) |
 | `max_candidates_per_ticker_per_bucket` | 5 | Top N kept after scoring per bucket |
 | `cc_recommendation.max_suggestions_per_term` | 3 | Suggestions shown per term in CC table |
-| `cc_recommendation.delta_min/max` | 0.10 / 0.25 | Delta range for CC verdict |
+| `cc_recommendation.delta_min/max` | 0.10 / 0.25 | Delta range for CC verdict (tighter than screening) |
+| `cc_recommendation.min_acceptable_sale_prices` | {} | Per-ticker dict: strike floor for CC verdict |
+| `cc_recommendation.min_strike_prices` | {} | Per-ticker dict: pre-filter strikes below this before processing |
+| `cc_recommendation.max_strike_prices` | {} | Per-ticker dict: pre-filter strikes above this before processing |
+| `cc_recommendation.min_yield` | 10% | CALL screening yield threshold — replaces global `min_annualized_yield` for calls when set |
+| `cc_recommendation.long_term_months` | 9 | Months ahead to fetch monthly CC expirations beyond max_dte |
+| `cc_recommendation.resistance_pct_buffer` | 2% | Buffer for near-resistance flag on CC strikes |
 | `csp_recommendation.ivr_min` | 30% | IVR hard floor for CSP verdict |
+| `csp_recommendation.use_support_filter` | True | Require strike at/below support for CSP (relaxed if no matches) |
+| `csp_recommendation.support_pct_buffer` | 2% | Buffer above support level still considered "at support" |
+| `csp_recommendation.delta_min/max` | 0.10 / 0.25 | Delta range for CSP verdict |
 | `options_data_provider` | yfinance | `yfinance` or `public` |
+| `iv_history_path` | ./cache/iv_history.csv | ATM IV snapshot store (shared across profiles) |
+| `iv_rank_min_history_days` | 20 | Observations needed before true IV Rank replaces HV proxy |
+| `outcome_tracking.enabled` | true | Record + grade recommendations after expiry |
+| `outcome_tracking.path` | ./cache/outcomes.csv | Recommendation outcome ledger |
+| `fetch_max_workers` | 4 | Tickers processed concurrently (1 = sequential) |
+| `scoring.weights.*` | see Step 4 | Component weights (normalized by their sum) |
+| `scoring.delta_target` | 0.20 | \|delta\| the delta component scores highest at |
+| `scoring.income_yield_cap` | 1.5 | Absolute income axis saturates at this annualized yield |
 
 ---
 
@@ -526,7 +772,8 @@ options-screener/
 │   │   └── factory.py               ← provider selection + fallback wrapper
 │   │
 │   ├── signals/
-│   │   ├── options_metrics.py       ← expiration selection, filtering, BS delta
+│   │   ├── options_metrics.py       ← expiration selection (incl. monthly CC), filtering, BS delta
+│   │   ├── iv_history.py            ← ATM IV snapshots + true IV Rank
 │   │   └── technicals.py            ← MA20, MA50, RSI14, HV20
 │   │
 │   ├── scoring/
@@ -539,10 +786,20 @@ options-screener/
 │   ├── reporting/
 │   │   └── render.py                ← HTML + CSV report generation
 │   │
+│   ├── tracking/
+│   │   └── outcomes.py              ← recommendation ledger + expiry grading
+│   │
 │   └── utils/
 │       ├── dates.py                 ← is_third_friday()
 │       ├── env.py                   ← .env file loader
 │       └── logging.py               ← logger setup (file + console)
+│
+├── tests/                           ← pytest suite (metrics, scoring, recommenders,
+│                                      IV history, outcome tracking, technicals)
+│
+├── cache/
+│   ├── iv_history.csv               ← ATM IV snapshots (one per ticker per day)
+│   └── outcomes.csv                 ← recommendation outcome ledger
 │
 └── logs/
     └── {ticker}_data.csv            ← per-ticker audit log of all API calls

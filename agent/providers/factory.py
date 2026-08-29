@@ -65,12 +65,10 @@ class _FallbackOptionsProvider(OptionsChainProvider):
             for df in [calls, puts]:
                 if df.empty or "contractSymbol" not in df.columns:
                     continue
-                delta_vals = [
-                    (greeks.get(self._primary._normalize_osi_symbol(s)) or {}).get("delta")
-                    for s in df["contractSymbol"]
-                ]
-                df["delta"] = delta_vals
-            self._logger.info("Delta enriched from Public greeks for %d symbol(s)", len(greeks))
+                rows = [greeks.get(self._primary._normalize_osi_symbol(s)) or {} for s in df["contractSymbol"]]
+                df["delta"] = [g.get("delta") for g in rows]
+                df["theta"] = [g.get("theta") for g in rows]
+            self._logger.info("Delta/theta enriched from Public greeks for %d symbol(s)", len(greeks))
         except Exception as exc:
             self._logger.debug("Public delta enrichment failed (best-effort): %s", exc)
 

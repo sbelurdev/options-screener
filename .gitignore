@@ -207,3 +207,8 @@ marimo/_lsp/
 __marimo__/
 logs/
 reports/
+
+# Screener runtime artifacts (synced via OneDrive, not git)
+cache/
+.last_run_meta.json
+cw_run_log.txt

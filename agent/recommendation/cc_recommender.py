@@ -115,6 +115,7 @@ def _recommend_for_bucket(
     price_df: pd.DataFrame,
     rec_config: Dict[str, Any],
     max_suggestions: int = 3,
+    iv_rank: Optional[Tuple[Optional[float], str]] = None,
 ) -> List[Dict[str, Any]]:
     """
     Return up to max_suggestions ranked suggestions for one term bucket.
@@ -160,7 +161,7 @@ def _recommend_for_bucket(
     results: List[Dict[str, Any]] = []
     for best in top_n:
         strike = float(best["strike"])
-        premium = float(best.get("mid", 0))
+        premium = float(best.get("fill_price") or best.get("mid", 0))
         delta_val = best.get("delta")
         dte_val = best.get("dte")
 
@@ -170,9 +171,13 @@ def _recommend_for_bucket(
         delta_in_range = _delta_ok(best)
         earnings_ok = _earnings_ok(best)
 
-        # IVR — informational only, does not affect verdict
-        best_iv = float(best["implied_volatility"]) if best.get("implied_volatility") else None
-        ivr_value, ivr_source = compute_ivr_proxy(price_df, best_iv)
+        # IVR — informational only, does not affect verdict.
+        # True IV Rank from persisted history when available, HV proxy otherwise.
+        if iv_rank is not None and iv_rank[0] is not None:
+            ivr_value, ivr_source = iv_rank
+        else:
+            best_iv = float(best["implied_volatility"]) if best.get("implied_volatility") else None
+            ivr_value, ivr_source = compute_ivr_proxy(price_df, best_iv)
 
         # ── Verdict ────────────────────────────────────────────────────────
         issues: List[str] = []
@@ -233,12 +238,13 @@ def _recommend_monthly_cc(
     earnings_date: Optional[date],
     min_acceptable_price: Optional[float],
     rec_config: Dict[str, Any],
+    iv_rank: Optional[Tuple[Optional[float], str]] = None,
 ) -> List[Dict[str, Any]]:
     """
     For each monthly expiration beyond max_dte, pick the single best CALL by
-    annualized yield.  Returns one row per expiration month, sorted by date.
-    The verdict logic mirrors _recommend_for_bucket but yield is the primary
-    selection criterion, not score.
+    risk-adjusted annualized yield (yield × (1 − |delta|)).  Returns one row per
+    expiration month, sorted by date.  The verdict logic mirrors
+    _recommend_for_bucket but yield is the primary selection criterion, not score.
     """
     if not monthly_call_candidates:
         return []
@@ -255,14 +261,21 @@ def _recommend_monthly_cc(
     for c in monthly_call_candidates:
         by_expiry.setdefault(str(c.get("expiration", "")), []).append(c)
 
+    # Risk-adjusted yield: |delta| approximates P(called away), so this is the
+    # premium weighted by the probability of keeping the shares.
+    def _risk_adj_yield(c: Dict[str, Any]) -> float:
+        y = float(c.get("annualized_yield") or 0)
+        d = c.get("delta")
+        assignment_prob = min(abs(float(d)), 1.0) if d else 0.0
+        return y * (1.0 - assignment_prob)
+
     results: List[Dict[str, Any]] = []
     for exp_str in sorted(by_expiry.keys()):
         pool = by_expiry[exp_str]
-        # Primary sort: annualized yield descending
-        best = max(pool, key=lambda c: float(c.get("annualized_yield") or 0))
+        best = max(pool, key=_risk_adj_yield)
 
         strike = float(best["strike"])
-        premium = float(best.get("mid", 0))
+        premium = float(best.get("fill_price") or best.get("mid", 0))
         delta_val = best.get("delta")
         dte_val = best.get("dte")
         ann_yield = best.get("annualized_yield")
@@ -288,8 +301,11 @@ def _recommend_monthly_cc(
             except ValueError:
                 pass
 
-        best_iv = float(best["implied_volatility"]) if best.get("implied_volatility") else None
-        ivr_value, ivr_source = compute_ivr_proxy(price_df, best_iv)
+        if iv_rank is not None and iv_rank[0] is not None:
+            ivr_value, ivr_source = iv_rank
+        else:
+            best_iv = float(best["implied_volatility"]) if best.get("implied_volatility") else None
+            ivr_value, ivr_source = compute_ivr_proxy(price_df, best_iv)
 
         issues: List[str] = []
         if not delta_in_range:
@@ -309,7 +325,7 @@ def _recommend_monthly_cc(
         else:
             verdict = "Yes"
             d_str = f"{abs(float(delta_val)):.2f}" if delta_val is not None else "n/a"
-            reason = f"delta {d_str}; best annualized yield for month"
+            reason = f"delta {d_str}; best risk-adjusted yield for month"
             if near_res:
                 reason += "; near resistance (favourable)"
 
@@ -350,6 +366,7 @@ def recommend_cc_for_ticker(
     min_acceptable_price: Optional[float],
     rec_config: Dict[str, Any],
     monthly_call_candidates: Optional[List[Dict[str, Any]]] = None,
+    iv_rank: Optional[Tuple[Optional[float], str]] = None,
 ) -> List[Dict[str, Any]]:
     """
     Produce CC suggestions (Short-Term / Medium-Term / Long-Term + Monthly) for one ticker.
@@ -393,6 +410,7 @@ def recommend_cc_for_ticker(
                 price_df=price_df,
                 rec_config=rec_config,
                 max_suggestions=max_suggestions,
+                iv_rank=iv_rank,
             )
         )
 
@@ -406,6 +424,7 @@ def recommend_cc_for_ticker(
                 earnings_date=earnings_date,
                 min_acceptable_price=min_acceptable_price,
                 rec_config=rec_config,
+                iv_rank=iv_rank,
             )
         )
 
@@ -445,6 +464,7 @@ def build_cc_recommendations(
             min_acceptable_price=min_price,
             rec_config=rec_config,
             monthly_call_candidates=tr.get("monthly_call_candidates", []),
+            iv_rank=tr.get("iv_rank"),
         )
         results.extend(recs)
 
