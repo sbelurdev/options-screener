@@ -1,21 +1,17 @@
 covered_call_tickers:
 - MSFT
 - NVDA
-- GOOGL
-- CRM
-- NOW
 cc_recommendation:
   min_strike_prices:
-    MSFT: 500.0
-    NVDA: 225.0
+    MSFT: 535.0
+    NVDA: 245.0
   max_strike_prices:
     MSFT: 620.0
-    NVDA: 260.0
+    NVDA: 275.0
   min_yield: 0.05
   long_term_months: 12
 cash_secured_put_tickers:
 - TQQQ
-- GOOGL
 output_dir: ./reports/prasanna
 log_dir: ./logs/prasanna
 cache_dir: ./cache/prasanna
@@ -26,3 +22,41 @@ schedule:
   times:
   - 07:45
   - '12:00'
+daytrading:
+  watchlist:
+  - SPY
+  - QQQ
+  - MSFT
+  - NVDA
+  - AAPL
+  - GOOGL
+  - AMZN
+  - META
+  - TSLA
+  exclusions: {}
+  rsi_min: 50.0
+  rsi_max: 75.0
+  require_close_above_trend_ma: true
+  trend_ma_type: EMA
+  trend_ma_period: 9
+  or_start: 09:30
+  or_end: 09:40
+  trigger_start: 09:45
+  trigger_cutoff: '11:00'
+  dte_min: 3
+  dte_max: 5
+  delta_min: 0.6
+  delta_max: 0.7
+  delta_target: 0.65
+  max_spread_pct_of_mid: 0.03
+  min_open_interest: 500
+  account_size: 0.0
+  risk_pct_per_trade: 0.005
+  max_concurrent_positions: 2
+  time_stop_minutes: 45
+  hard_close: '15:30'
+  block_on_earnings_in_window: true
+  require_market_gate: true
+  notify_emails:
+  - Prasanna.Kudli@outlook.com
+  - Kiran.Balisagar@gmail.com

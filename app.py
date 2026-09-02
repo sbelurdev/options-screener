@@ -6,6 +6,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from functools import lru_cache
 from datetime import date, datetime
@@ -18,6 +19,7 @@ import yaml
 
 sys.path.insert(0, str(Path(__file__).parent))
 from agent.utils.env import load_dotenv_if_present
+from agent.utils.logging import setup_logging
 from agent.reporting.dashboard_table import (
     _BUCKET_LABELS,
     _NUMERIC_COLS,
@@ -132,6 +134,164 @@ def discover_latest_report(cfg: dict) -> dict:
         "timestamp": datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M"),
         "_mtime": mtime,
     }
+
+
+# ── Server-side scheduler ────────────────────────────────────────────────────
+#
+# Runs in a background daemon thread started once per server process (see
+# _start_scheduler_thread below), not in a browser-driven st.fragment. A
+# browser tab's auto-refresh timer is throttled or paused whenever the tab is
+# backgrounded, minimized, or the machine briefly sleeps, which made the old
+# approach fire "sometimes" rather than reliably. This thread runs for the
+# life of the `streamlit run app.py` process regardless of what any browser
+# tab is doing — the only thing it still can't survive is the process itself
+# not running (machine fully asleep, or the server not started).
+
+_SCHEDULE_GRACE_MINUTES = 30  # catch a slot the thread reaches late (e.g. just after process start)
+
+
+def _execute_headless_pipeline(profile: str, log) -> dict:
+    """Runs `main.py --headless` for one profile and returns a result dict.
+
+    No Streamlit/session_state dependency, so this is safe to call from the
+    background scheduler thread (which has no browser session at all) as well
+    as from the interactive script. Email delivery happens inside main.py
+    itself, so a successful run here has already sent it.
+    """
+    run_cfg = load_merged_config(profile)
+    run_cfg["active_profile"] = profile
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False, encoding="utf-8") as tmp:
+        yaml.dump(run_cfg, tmp, default_flow_style=False, allow_unicode=True)
+        tmp_path = tmp.name
+
+    ok = False
+    log_lines: list[str] = []
+    started = time.time()
+    try:
+        env = {**os.environ, "PYTHONUNBUFFERED": "1"}
+        proc = subprocess.Popen(
+            [sys.executable, "main.py", "--headless", "--config", tmp_path],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1, env=env,
+        )
+        for line in proc.stdout:
+            log_lines.append(line.rstrip())
+        proc.wait()
+        ok = proc.returncode == 0
+    except Exception as exc:  # noqa: BLE001
+        log_lines.append(f"ERROR: {exc}")
+    finally:
+        Path(tmp_path).unlink(missing_ok=True)
+
+    duration_s = round(time.time() - started, 1)
+    result = {"ok": ok, "log": "\n".join(log_lines), "duration_s": duration_s}
+
+    report_dir = Path(run_cfg.get("output_dir", "./reports"))
+    today_str = date.today().isoformat()
+    for field, name in (("csv_path", "options_report"), ("cc_recs_path", "cc_recs"),
+                        ("csp_recs_path", "csp_recs"), ("monthly_calls_path", "monthly_calls")):
+        p = report_dir / f"{today_str}_{name}.csv"
+        result[field] = str(p) if p.exists() else None
+
+    if ok:
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+        result["timestamp"] = timestamp
+        save_run_meta({
+            "ok": True,
+            "csv_path": result["csv_path"],
+            "cc_recs_path": result["cc_recs_path"],
+            "csp_recs_path": result["csp_recs_path"],
+            "monthly_calls_path": result["monthly_calls_path"],
+            "timestamp": timestamp,
+            "duration_s": duration_s,
+        })
+    log.info(f"[scheduler] Headless run for '{profile}' finished: ok={ok} "
+             f"duration={duration_s}s")
+    if not ok:
+        log.warning(f"[scheduler] Headless run for '{profile}' failed; tail of output:\n"
+                    + "\n".join(log_lines[-20:]))
+    return result
+
+
+def _scheduler_profile() -> str:
+    """The single profile this server instance runs under — same lookup the
+    UI uses to pick its default profile (OPTIONS_SCREENER_PROFILE, else the
+    first profile alphabetically). Deliberately NOT every profile under
+    config/users/: this is a single-tenant deployment (one instance per
+    machine/user), and auto-running every other profile that merely inherits
+    base.yaml's schedule default (nobody had to opt in) burns API quota on
+    reports nobody asked for and nowhere configured to email."""
+    profiles = get_profiles()
+    return os.getenv("OPTIONS_SCREENER_PROFILE", profiles[0] if profiles else "")
+
+
+def _run_scheduler_loop() -> None:
+    """Forever loop in its own thread: checks the server's own profile's
+    schedule, independent of what any browser session has selected."""
+    fired_today: set = set()
+    while True:
+        try:
+            profile = _scheduler_profile()
+            if profile:
+                now = datetime.now()
+                today = now.date().isoformat()
+                cfg = load_merged_config(profile)
+                sched = cfg.get("schedule", {})
+                if sched.get("enabled", False):
+                    log = setup_logging(cfg)
+                    for t in (sched.get("times") or []):
+                        try:
+                            parts = str(t).strip().split(":")
+                            h, m = int(parts[0]), int(parts[1])
+                        except Exception:
+                            continue
+                        key = (profile, today, f"{h:02d}:{m:02d}")
+                        if key in fired_today:
+                            continue
+                        scheduled_at = now.replace(hour=h, minute=m, second=0, microsecond=0)
+                        elapsed_min = (now - scheduled_at).total_seconds() / 60.0
+                        if elapsed_min < 0:
+                            continue
+                        if elapsed_min > _SCHEDULE_GRACE_MINUTES:
+                            fired_today.add(key)
+                            log.warning(
+                                f"[scheduler] {profile} {h:02d}:{m:02d} missed - the scheduler "
+                                f"thread did not reach it within {_SCHEDULE_GRACE_MINUTES} min "
+                                f"(process may have just started, or was busy with another run)."
+                            )
+                            continue
+                        fired_today.add(key)
+                        log.info(f"[scheduler] Triggering headless run for '{profile}' "
+                                 f"(scheduled {h:02d}:{m:02d}, actual {now:%H:%M:%S}).")
+                        try:
+                            _execute_headless_pipeline(profile, log)
+                        except Exception as exc:  # noqa: BLE001
+                            log.exception(f"[scheduler] Headless run for '{profile}' raised: {exc}")
+        except Exception:  # noqa: BLE001
+            # A bug here must never kill the loop - a dead scheduler thread is
+            # exactly the silent-failure mode this whole redesign exists to avoid.
+            pass
+        time.sleep(20)
+
+
+@st.cache_resource
+def _start_scheduler_thread() -> threading.Thread:
+    """Runs the target exactly once per server process (st.cache_resource is
+    shared across all sessions), regardless of how many browser tabs open,
+    reconnect, or close."""
+    t = threading.Thread(target=_run_scheduler_loop, name="options-scheduler", daemon=True)
+    t.start()
+    return t
+
+
+@st.cache_resource
+def _start_daytrading_scheduler_thread() -> threading.Thread:
+    """Same single-process-lifetime guarantee as _start_scheduler_thread, for
+    the DayTrading tab's warm-up/polling/signal-email pipeline — see
+    agent.daytrading.scheduler for why that needed the same fix as the CC/CSP
+    scheduler above. Scoped to the same single profile this server runs
+    under, for the same reason (see _scheduler_profile)."""
+    from agent.daytrading.scheduler import start_scheduler_thread
+    return start_scheduler_thread(_scheduler_profile())
 
 
 # ── UI helpers ─────────────────────────────────────────────────────────────────
@@ -417,35 +577,29 @@ def _next_scheduled_time(times: list) -> str:
     return f"Next: {upcoming[0][1]}"
 
 
-@st.fragment(run_every=30)
-def _schedule_watcher() -> None:
-    """Runs every 30 s; triggers a pipeline run when the clock matches a schedule entry."""
+@st.fragment(run_every=45)
+def _live_status_refresh() -> None:
+    """Pure display refresh — the actual scheduling runs in the background
+    thread (_run_scheduler_loop), independent of this or any other tab. This
+    just re-checks disk periodically so a run that thread (or a headless CLI
+    invocation) produced shows up here without the user clicking anything,
+    the same way discover_latest_report already does once at page load.
+    """
     if st.session_state.is_running or st.session_state.should_run:
         return
     active_profile = st.session_state.get("_active_profile", "")
-    cfg = load_merged_config(active_profile)
-    sched = cfg.get("schedule", {})
-    if not sched.get("enabled", False):
+    if not active_profile:
         return
-    times = sched.get("times", []) or []
-    now = datetime.now()
-    today = now.date().isoformat()
-    for t in times:
-        try:
-            parts = str(t).strip().split(":")
-            h, m = int(parts[0]), int(parts[1])
-        except Exception:
-            continue
-        if now.hour == h and now.minute == m:
-            key = f"{today}_{h:02d}:{m:02d}"
-            if st.session_state._last_auto_run_key != key:
-                st.session_state._last_auto_run_key = key
-                run_cfg = load_merged_config(active_profile)
-                run_cfg["active_profile"] = active_profile
-                st.session_state.pending_run_config = run_cfg
-                st.session_state.should_run = True
-                st.session_state.is_running = True
-                st.rerun()
+    _disk = discover_latest_report(load_merged_config(active_profile))
+    if _disk and _disk["_mtime"] > _file_mtime(st.session_state.last_csv_path):
+        st.session_state.last_run_ok = True
+        st.session_state.last_csv_path = _disk["csv_path"]
+        st.session_state.last_cc_recs_path = _disk["cc_recs_path"]
+        st.session_state.last_csp_recs_path = _disk["csp_recs_path"]
+        st.session_state.last_monthly_calls_path = _disk["monthly_calls_path"]
+        st.session_state.last_run_timestamp = _disk["timestamp"]
+        st.session_state.last_run_duration = None
+        st.rerun()
 
 
 # ── Page setup ─────────────────────────────────────────────────────────────────
@@ -655,7 +809,6 @@ for key, default in [
     ("is_running", False),
     ("should_run", False),
     ("pending_run_config", None),
-    ("_last_auto_run_key", ""),
     ("_active_profile", ""),
 ]:
     if key not in st.session_state:
@@ -750,7 +903,13 @@ if _sched_cfg_top.get("enabled") and _sched_cfg_top.get("times"):
 cfg = load_merged_config(profile)
 cc_cfg = cfg.get("cc_recommendation", {})
 
-_schedule_watcher()
+# Starts the server-side scheduler threads exactly once per process (a no-op
+# on every call after the first — see their cache_resource decorators); the
+# actual triggering lives there, this tab only needs to stay visually in sync
+# with whatever they produce.
+_start_scheduler_thread()
+_start_daytrading_scheduler_thread()
+_live_status_refresh()
 
 # ── Config expander ────────────────────────────────────────────────────────────
 
@@ -901,7 +1060,9 @@ if st.session_state.last_run_ok:
         st.session_state.last_csp_recs_path,
     )
 
-tab_calls, tab_puts, tab_perf = st.tabs(["📈 Calls", "📉 Puts", "📊 Performance"])
+tab_calls, tab_puts, tab_perf, tab_day = st.tabs(
+    ["📈 Calls", "📉 Puts", "📊 Performance", "⚡ DayTrading"]
+)
 
 # Ties each tab's filter widgets to the report actually being shown (profile +
 # run) so switching profiles or completing a new run starts filters fresh
@@ -924,6 +1085,16 @@ with tab_puts:
 
 with tab_perf:
     _show_performance(cfg)
+
+with tab_day:
+    # Imported lazily so a DayTrading-only problem can never stop the existing
+    # Calls/Puts/Performance tabs from rendering.
+    try:
+        from agent.daytrading.views import render_daytrading_tab
+        render_daytrading_tab(profile)
+    except Exception as exc:  # noqa: BLE001
+        st.error(f"DayTrading tab failed to load: {exc}")
+        st.exception(exc)
 
 
 # ── Execute queued run ─────────────────────────────────────────────────────────
