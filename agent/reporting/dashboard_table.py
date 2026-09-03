@@ -298,12 +298,16 @@ def _dte_bucket(n: int) -> str:
 _NUMERIC_COLS = {
     "AnnualYield", "Current", "Strike", "%OTM", "%ToStrike", "DTE", "Premium",
     "Delta", "IVR", "VRP", "ΘYld", "MaxProfit", "Breakeven", "CashRqd", "Score",
+    "Level",
 }
 
 _TABLE_CSS = (
     "<style>"
     ".ot-wrap{border:1px solid rgba(148,163,184,0.16);border-radius:12px;"
-    "overflow-x:auto;background:rgba(15,23,42,0.35);}"
+    # overflow-y explicit (not left to default-with-x) so the criteria hover
+    # card below can escape vertically instead of being clipped by the same
+    # box that scrolls the table horizontally.
+    "overflow-x:auto;overflow-y:visible;background:rgba(15,23,42,0.35);}"
     ".ot{border-collapse:separate;border-spacing:0;width:100%;font-size:12.5px;"
     "font-family:ui-monospace,'Segoe UI Mono',Consolas,monospace;}"
     ".ot th{padding:8px 10px;text-align:left;white-space:nowrap;"
@@ -332,6 +336,33 @@ _TABLE_CSS = (
     "font-size:10px;font-weight:700;letter-spacing:0.06em;}"
     ".pe-yes{background:rgba(34,197,94,0.18);color:#4ade80;border:1px solid rgba(34,197,94,0.45);}"
     ".pe-no{background:rgba(239,68,68,0.14);color:#f87171;border:1px solid rgba(239,68,68,0.40);}"
+    ".pe-mid{background:rgba(148,163,184,0.14);color:#94a3b8;border:1px solid rgba(148,163,184,0.35);}"
+    ".ot td[title]{cursor:help;}"
+    # Per-criterion hover card (pure CSS, no JS): a hidden panel revealed by
+    # :hover on its anchor. A compact 3-column table — name, value, note all
+    # on one line per criterion — colored green/yellow/red against the same
+    # thresholds the recommender actually screens by.
+    ".ot .crit-anchor{position:relative;display:inline-block;cursor:help;}"
+    ".ot .crit-card{display:none;position:absolute;z-index:100;top:100%;"
+    "margin-top:6px;background:#0b1220;border:1px solid rgba(148,163,184,0.32);"
+    "border-radius:10px;padding:6px;width:400px;box-shadow:0 14px 32px rgba(0,0,0,0.55);"
+    "white-space:normal;text-align:left;}"
+    ".ot .crit-anchor.left .crit-card{left:0;}"
+    ".ot .crit-anchor.right .crit-card{right:0;}"
+    ".ot .crit-anchor:hover .crit-card{display:block;}"
+    ".ot .crit-table{border-collapse:collapse;width:100%;}"
+    ".ot .crit-table td{padding:3px 6px;font-size:10.5px;border-left:3px solid transparent;"
+    "vertical-align:baseline;}"
+    ".ot .crit-table tr.cg td{border-left-color:#22c55e;background:rgba(34,197,94,0.09);}"
+    ".ot .crit-table tr.cy td{border-left-color:#fbbf24;background:rgba(251,191,36,0.07);}"
+    ".ot .crit-table tr.cr td{border-left-color:#ef4444;background:rgba(239,68,68,0.09);}"
+    ".ot .crit-table tr+tr td{border-top:1px solid rgba(148,163,184,0.08);}"
+    ".ot .crit-name{font-weight:700;color:#e2e8f0;white-space:nowrap;}"
+    ".ot .crit-val{font-weight:700;white-space:nowrap;text-align:right;}"
+    ".ot .crit-table tr.cg .crit-val{color:#4ade80;}"
+    ".ot .crit-table tr.cy .crit-val{color:#fbbf24;}"
+    ".ot .crit-table tr.cr .crit-val{color:#f87171;}"
+    ".ot .crit-note{color:#94a3b8;line-height:1.3;}"
     ".ot td.yld{font-weight:700;color:#fbbf24;}"
     ".ot td.wc{white-space:normal;min-width:160px;max-width:300px;"
     "font-size:11px;line-height:1.35;color:#94a3b8;}"
@@ -348,6 +379,11 @@ _TABLE_CSS = (
     "margin-right:6px;vertical-align:1px;}"
     ".ot .dot.dg{background:#22c55e;}.ot .dot.da{background:#fbbf24;}"
     ".ot .dot.dr{background:#ef4444;}"
+    # "Level" column: signed distance from the suggested strike (context
+    # panel) — positive/green means this row's strike clears the level,
+    # negative/red means it's on the wrong side of it.
+    ".ot td.lvl-pos{color:#4ade80;font-weight:600;}"
+    ".ot td.lvl-neg{color:#f87171;font-weight:600;}"
     "</style>"
 )
 
@@ -357,6 +393,32 @@ def _pct_from_cell(cell: str) -> Optional[float]:
         return float(cell.replace("%", "").strip())
     except (TypeError, ValueError):
         return None
+
+
+_CRIT_CLASS = {"green": "cg", "yellow": "cy", "red": "cr"}
+
+
+def _render_criteria_card(criteria, align: str) -> str:
+    """The hover-card HTML for a row's per-criterion breakdown (see
+    agent.scoring.explain.criteria_rows) — a compact 3-column table (name,
+    value, note all on one line per criterion), colored against the same
+    thresholds the recommender actually screens by, with the typical range
+    stated so the color is never a black box. `align` ("left"/"right")
+    anchors the card so it opens away from the table edge it's nearest to."""
+    if not isinstance(criteria, list) or not criteria:
+        return ""
+    rows_html = []
+    for c in criteria:
+        cls = _CRIT_CLASS.get(c.get("color"), "cy")
+        note = f"<td class='crit-note'>{_esc(c.get('note', ''))}</td>" if c.get("note") else "<td></td>"
+        rows_html.append(
+            f"<tr class='{cls}'>"
+            f"<td class='crit-name'>{_esc(c.get('name', ''))}</td>"
+            f"<td class='crit-val'>{_esc(c.get('value', ''))}</td>"
+            f"{note}</tr>"
+        )
+    return (f"<span class='crit-anchor {align}'>ⓘ<span class='crit-card'>"
+           f"<table class='crit-table'>" + "".join(rows_html) + "</table></span></span>")
 
 
 def _exp_group_label(exp: str, dte, count: int) -> str:
@@ -407,12 +469,26 @@ def _render_html_table(display_df: pd.DataFrame, group_by_expiration: bool = Tru
             cell = _esc(str(row.get(col, "") if row.get(col, "") is not None else ""))
             num_cls = "num" if col in _NUMERIC_COLS else ""
             if col == "Rec":
-                badge = ""
+                # _compare_why is the plain-English "why this trade vs its
+                # same-expiration neighbors" sentence (agent.scoring.explain);
+                # _verdict_why (the recommender's raw reason, or the score
+                # breakdown for an unpromoted row) is only a fallback for a
+                # single-row peer group with nothing to compare against.
+                # _criteria (also agent.scoring.explain) drives the rich,
+                # color-coded per-criterion card on the ⓘ icon.
+                explain = (str(row.get("_compare_why", "") or "")
+                          or str(row.get("_verdict_why", "") or ""))
+                title = f" title='{_esc(explain)}'" if explain else ""
                 if rec == "Yes":
                     badge = "<span class='pe-badge pe-yes'>YES</span>"
                 elif rec == "No":
                     badge = "<span class='pe-badge pe-no'>NO</span>"
-                parts.append(f"<td>{badge}</td>")
+                else:
+                    badge = "<span class='pe-badge pe-mid'>—</span>"
+                    if not title:
+                        title = " title='Not this term\\'s top pick - ranked by score, not by a Yes/No verdict'"
+                card = _render_criteria_card(row.get("_criteria"), "left")
+                parts.append(f"<td{title}>{badge} {card}</td>")
             elif col == "Why":
                 parts.append(f"<td class='wc'>{cell}</td>")
             elif col == "Flags":
@@ -445,6 +521,18 @@ def _render_html_table(display_df: pd.DataFrame, group_by_expiration: bool = Tru
                 marker = "*" if "proxy" in src.lower() else ""
                 title = f" title='{_esc(src)}'" if src else ""
                 parts.append(f"<td class='num'{title}>{cell}{marker}</td>")
+            elif col == "Score":
+                # Hover shows the plain-English comparison; the raw
+                # component breakdown is a fallback with nothing to compare.
+                explain = (str(row.get("_compare_why", "") or "")
+                          or str(row.get("_score_why", "") or ""))
+                title = f" title='{_esc(explain)}'" if explain else ""
+                card = _render_criteria_card(row.get("_criteria"), "right")
+                parts.append(f"<td class='num'{title}>{cell} {card}</td>")
+            elif col == "Level":
+                sign_cls = "lvl-pos" if cell.startswith("+") else ("lvl-neg" if cell.startswith("-") else "")
+                cls_attr = f" class='num {sign_cls}'".rstrip() if sign_cls else " class='num'"
+                parts.append(f"<td{cls_attr}>{cell}</td>")
             else:
                 cls_attr = f" class='{num_cls}'" if num_cls else ""
                 parts.append(f"<td{cls_attr}>{cell}</td>")

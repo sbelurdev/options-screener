@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date
 from pathlib import Path
@@ -11,6 +12,7 @@ from agent.providers.base import FundamentalsProvider, MarketDataProvider, Optio
 from agent.providers.factory import build_fundamentals_provider, build_market_provider, build_options_provider
 from agent.notify.email_report import send_report_email
 from agent.recommendation.cc_recommender import build_cc_recommendations
+from agent.recommendation.context import build_context_store
 from agent.recommendation.csp_recommender import build_csp_recommendations, compute_ivr_proxy
 
 from agent.reporting.render import write_per_ticker_reports, write_reports
@@ -360,6 +362,7 @@ def _process_ticker(
         except Exception as exc:
             logger.warning("%s: IV history update failed: %s", ticker, exc)
     ticker_result["iv_rank"] = iv_rank
+    ticker_result["atm_iv"] = atm_iv_obs[1] if atm_iv_obs is not None else None
 
     # Attach ticker-level IVR to every candidate for the detail table:
     # true IV Rank when available, otherwise the HV-rank proxy.
@@ -525,6 +528,20 @@ def run_pipeline(config: Dict[str, Any], logger) -> None:
         pd.DataFrame(csp_recommendations).to_csv(_out / f"{run_day}_csp_recs.csv", index=False)
     if all_monthly_call_candidates:
         pd.DataFrame(all_monthly_call_candidates).to_csv(_out / f"{run_day}_monthly_calls.csv", index=False)
+
+    # Per-ticker context (spot, earnings, regime, support/resistance, suggested
+    # strike) for the Calls/Puts tabs' context panel — computed once per
+    # ticker here rather than re-embedded into every candidate row's "reason"
+    # string. Buffers match whatever each recommender actually filters by, so
+    # the suggested price shown in the UI is the same number driving Yes/No.
+    context_store = build_context_store(
+        ticker_results_map,
+        resistance_buffer=float((config.get("cc_recommendation") or {}).get("resistance_pct_buffer", 0.02)),
+        support_buffer=float((config.get("csp_recommendation") or {}).get("support_pct_buffer", 0.02)),
+    )
+    if context_store:
+        with (_out / f"{run_day}_context.json").open("w", encoding="utf-8") as f:
+            json.dump(context_store, f)
 
     print("=" * 72)
     print("Options Screener Summary")

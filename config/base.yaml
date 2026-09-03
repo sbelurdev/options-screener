@@ -30,9 +30,14 @@ max_dte: 45
 short_term_max_dte: 14
 medium_term_max_dte: 28
 
-min_open_interest: null
+min_open_interest: 100
 min_volume: null
-max_spread_pct: null
+max_spread_pct: 0.15
+# Options tab (Calls/Puts): default state of the "Clear suggested strike"
+# toggle — only show strikes on the favorable side of the context panel's
+# suggested strike (resistance for calls, support for puts). Per-profile,
+# changeable from the tab itself (flipping it there saves the new default).
+filter_by_suggested_strike: true
 html_min_mid_price: 0.5
 fill_price_factor: 0.4  # expected fill = bid + factor × (ask − bid); 0.5 = mid, sellers usually concede some spread
 fetch_max_workers: 4    # tickers fetched concurrently (1 = sequential)

@@ -1,6 +1,6 @@
 ﻿from __future__ import annotations
 
-from typing import Dict
+from typing import Dict, Tuple
 
 import numpy as np
 import pandas as pd
@@ -36,3 +36,34 @@ def compute_technicals(price_df: pd.DataFrame) -> Dict[str, float]:
         "rsi14": float(rsi.iloc[-1]) if pd.notna(rsi.iloc[-1]) else 50.0,
         "hv20": float(hv20) if pd.notna(hv20) else 0.25,
     }
+
+
+def classify_regime(spot: float, ma20: float, ma50: float, rsi14: float) -> Tuple[str, str]:
+    """A real, varying Bullish/Neutral/Bearish label from the same inputs
+    agent/scoring/score.py's trend sub-score already uses — that sub-score's
+    "reason" was a hardcoded string that never actually changed with the
+    computed value, so there was no reusable label anywhere. This is that
+    label, for the per-ticker context panel.
+
+    Bullish: above both MAs and not overbought. Bearish: below both MAs, or
+    overbought while below the long MA (stretched with no support underneath).
+    Everything else — mixed MA signals, or overbought while still trending up
+    — is Neutral: informative context, not a directional call.
+    """
+    above20 = spot > ma20
+    above50 = spot > ma50
+    overbought = rsi14 > 75
+    oversold = rsi14 < 30
+
+    if above20 and above50 and not overbought:
+        return "Bullish", f"close above both MA20 (${ma20:,.2f}) and MA50 (${ma50:,.2f})"
+    if not above20 and not above50:
+        reason = f"close below both MA20 (${ma20:,.2f}) and MA50 (${ma50:,.2f})"
+        if oversold:
+            reason += f"; RSI {rsi14:.0f} oversold"
+        return "Bearish", reason
+    if overbought and not above50:
+        return "Bearish", f"RSI {rsi14:.0f} overbought while below MA50 (${ma50:,.2f})"
+    if overbought:
+        return "Neutral", f"RSI {rsi14:.0f} overbought — trend intact but stretched"
+    return "Neutral", "mixed signal — above one MA, below the other"

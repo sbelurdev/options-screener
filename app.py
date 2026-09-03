@@ -24,8 +24,6 @@ from agent.reporting.dashboard_table import (
     _BUCKET_LABELS,
     _NUMERIC_COLS,
     _TABLE_CSS,
-    _build_calls_display,
-    _build_puts_display,
     _col,
     _dte_bucket,
     _exp_group_label,
@@ -33,9 +31,10 @@ from agent.reporting.dashboard_table import (
     _fmt_pct,
     _pct_from_cell,
     _render_html_table,
-    build_calls_combined,
-    build_puts_combined,
 )
+from agent.recommendation.context import strategy_fit
+from agent.scoring.explain import criteria_rows, explain_group
+from agent.recommendation.strategies import STRATEGIES, Strategy
 load_dotenv_if_present(".env")
 
 BASE_CONFIG_PATH = Path("config/base.yaml")
@@ -131,6 +130,7 @@ def discover_latest_report(cfg: dict) -> dict:
         "cc_recs_path": str(out_dir / f"{day}_cc_recs.csv"),
         "csp_recs_path": str(out_dir / f"{day}_csp_recs.csv"),
         "monthly_calls_path": str(out_dir / f"{day}_monthly_calls.csv"),
+        "context_path": str(out_dir / f"{day}_context.json"),
         "timestamp": datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M"),
         "_mtime": mtime,
     }
@@ -191,6 +191,8 @@ def _execute_headless_pipeline(profile: str, log) -> dict:
                         ("csp_recs_path", "csp_recs"), ("monthly_calls_path", "monthly_calls")):
         p = report_dir / f"{today_str}_{name}.csv"
         result[field] = str(p) if p.exists() else None
+    context_p = report_dir / f"{today_str}_context.json"
+    result["context_path"] = str(context_p) if context_p.exists() else None
 
     if ok:
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
@@ -201,6 +203,7 @@ def _execute_headless_pipeline(profile: str, log) -> dict:
             "cc_recs_path": result["cc_recs_path"],
             "csp_recs_path": result["csp_recs_path"],
             "monthly_calls_path": result["monthly_calls_path"],
+            "context_path": result["context_path"],
             "timestamp": timestamp,
             "duration_s": duration_s,
         })
@@ -339,43 +342,40 @@ def extract_strike_dicts(df: pd.DataFrame) -> tuple[dict, dict]:
 # _fmt_money/_fmt_pct/table-building live in agent/reporting/dashboard_table.py,
 # shared with the static per-ticker HTML files so both render identically.
 
-def _load_calls_view(
-    csv_path: Optional[str],
-    monthly_path: Optional[str],
-    recs_path: Optional[str],
-) -> pd.DataFrame:
+def _load_strategy_view(strategy: Strategy) -> pd.DataFrame:
+    """Candidates + recs, combined, for one strategy's full watchlist —
+    driven entirely by the registry entry (agent/recommendation/strategies.py)
+    so a new strategy needs no new loader function here."""
     candidates_df = pd.DataFrame()
+    csv_path = st.session_state.last_csv_path
     if csv_path and Path(csv_path).exists():
         df = pd.read_csv(csv_path)
         if "strategy" in df.columns:
-            candidates_df = df[df["strategy"] == "CALL"].copy()
-
-    monthly_df = pd.DataFrame()
-    if monthly_path and Path(monthly_path).exists():
-        monthly_df = pd.read_csv(monthly_path)
+            candidates_df = df[df["strategy"] == strategy.option_right].copy()
 
     recs_df = pd.DataFrame()
+    recs_path = st.session_state.get(strategy.recs_state_key)
     if recs_path and Path(recs_path).exists():
         recs_df = pd.read_csv(recs_path)
 
-    return build_calls_combined(candidates_df, monthly_df, recs_df)
+    if strategy.has_monthly:
+        monthly_df = pd.DataFrame()
+        monthly_path = st.session_state.last_monthly_calls_path
+        if monthly_path and Path(monthly_path).exists():
+            monthly_df = pd.read_csv(monthly_path)
+        return strategy.combine_fn(candidates_df, monthly_df, recs_df)
+    return strategy.combine_fn(candidates_df, recs_df)
 
 
-def _load_puts_view(
-    csv_path: Optional[str],
-    recs_path: Optional[str],
-) -> pd.DataFrame:
-    candidates_df = pd.DataFrame()
-    if csv_path and Path(csv_path).exists():
-        df = pd.read_csv(csv_path)
-        if "strategy" in df.columns:
-            candidates_df = df[df["strategy"] == "PUT"].copy()
-
-    recs_df = pd.DataFrame()
-    if recs_path and Path(recs_path).exists():
-        recs_df = pd.read_csv(recs_path)
-
-    return build_puts_combined(candidates_df, recs_df)
+def _load_context_store() -> dict:
+    path = st.session_state.get("last_context_path")
+    if path and Path(path).exists():
+        try:
+            with open(path, encoding="utf-8") as f:
+                return json.load(f)
+        except (OSError, ValueError):
+            return {}
+    return {}
 
 
 # ── Display ────────────────────────────────────────────────────────────────────
@@ -383,53 +383,195 @@ def _load_puts_view(
 # agent/reporting/dashboard_table.py (see top of file).
 
 
-def _show_tab(display_df: pd.DataFrame, key_prefix: str, data_version: str = "") -> None:
+_FIT_ICON = {"favorable": "✅", "mixed": "⚠️", "unfavorable": "❌", "unknown": ""}
+
+
+def _render_context_panel(context: Optional[dict], ticker: str, option_right: str) -> None:
+    """Ticker-level info shown once, above the table — replaces the old
+    per-row "Why"/"Current"/"E⚠" columns that repeated the same spot price
+    and reason phrasing on every line for the same ticker.
+
+    Regime/RSI/IVR each get a ✅/⚠️/❌ read via strategy_fit() — Regime and
+    RSI flip meaning between a covered call (neutral-to-bearish income on
+    held shares) and a cash-secured put (bullish-to-neutral); IV Rank does
+    not, richer premium helps either one. The suggested strike is the same
+    resistance/support level (with the same buffer) each recommender already
+    filters "near_resistance"/"near_support" by, just translated into a
+    plain price instead of a boolean you'd have to infer from Strike vs Flags.
+    """
+    if not context:
+        st.info(f"No context computed yet for {ticker} — run the screener to populate it.")
+        return
+
+    fit = strategy_fit(context, option_right)
+
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("Current Price", _fmt_money(context.get("spot")))
+    c2.metric(
+        "Regime", f"{_FIT_ICON[fit['regime']['read']]} {context.get('regime') or '—'}".strip(),
+        help=fit["regime"]["detail"],
+    )
+    rsi = context.get("rsi14")
+    c3.metric(
+        "RSI(14)", f"{_FIT_ICON[fit['rsi']['read']]} {rsi:.0f}".strip() if rsi is not None else "—",
+        help=fit["rsi"]["detail"],
+    )
+    ivr = context.get("ivr")
+    c4.metric(
+        "IV Rank", f"{_FIT_ICON[fit['ivr']['read']]} {_fmt_pct(ivr)}".strip() if ivr is not None else "—",
+        help=fit["ivr"]["detail"],
+    )
+    c5.metric("Earnings", context.get("earnings_date") or "—")
+
+    vrp = context.get("vrp")
+    if vrp is not None:
+        richness = "rich" if vrp >= 1.2 else ("cheap" if vrp < 1.0 else "roughly fair")
+        st.caption(
+            f"VRP: {vrp:.2f}× — implied volatility is running "
+            f"{'above' if vrp >= 1.0 else 'below'} the stock's actual 20-day move "
+            f"by that multiple ({richness} for selling premium).",
+            help="VRP = implied volatility ÷ 20-day realized volatility. Above 1.0 means "
+                 "the option market is pricing in more movement than the stock has actually "
+                 "shown recently — the classic edge in selling premium, since realized "
+                 "volatility tends to run below implied on average. Typical range: >1.2 is "
+                 "considered rich (favorable to sell), <1.0 means IV is cheap relative to "
+                 "what's actually happened.",
+        )
+
+    left, right = st.columns([1.3, 1])
+    with left:
+        suggested = (context.get("suggested_call_strike") if option_right == "CALL"
+                    else context.get("suggested_put_strike"))
+        if suggested is not None:
+            verb, level_src = (("Sell calls above", "20d swing high")
+                              if option_right == "CALL" else
+                              ("Sell puts below", "20d swing low"))
+            st.markdown(f"**Suggested strike: {verb} {_fmt_money(suggested)}**  \n({level_src} + buffer)")
+
+    with right:
+        support = context.get("support") or {}
+        resistance = context.get("resistance") or {}
+        g1, g2 = st.columns(2)
+        g1.caption(f"20d low **{_fmt_money(support.get('swing_low_20d'))}**"
+                  if support.get("swing_low_20d") is not None else "20d low —")
+        g2.caption(f"20d high **{_fmt_money(resistance.get('swing_high_20d'))}**"
+                  if resistance.get("swing_high_20d") is not None else "20d high —")
+        g3, g4 = st.columns(2)
+        g3.caption(f"52w low {_fmt_money(support.get('low_52w'))}"
+                  if support.get("low_52w") is not None else "52w low —")
+        g4.caption(f"52w high {_fmt_money(resistance.get('high_52w'))}"
+                  if resistance.get("high_52w") is not None else "52w high —")
+
+
+def _attach_comparison_explanations(raw: pd.DataFrame, option_right: str) -> pd.Series:
+    """One plain-English comparison sentence per row (agent.scoring.explain),
+    grouping by expiration — the same "same expiration = comparable strikes"
+    grouping already visible in the table via its "📅 ..." header rows."""
+    if raw.empty or "expiration" not in raw.columns:
+        return pd.Series([], dtype=str)
+    result = pd.Series("", index=raw.index, dtype=str)
+    for _, group in raw.groupby("expiration", sort=False):
+        rows = group.to_dict("records")
+        explanations = explain_group(rows, option_right)
+        for pos, idx in enumerate(group.index):
+            result.loc[idx] = explanations.get(pos, "")
+    return result
+
+
+def _attach_criteria(raw: pd.DataFrame, config: dict, option_right: str) -> pd.Series:
+    """One list of per-criterion dicts per row (agent.scoring.explain.
+    criteria_rows) — the data behind the ⓘ hover card. An object-dtype
+    Series (each cell holds a list of dicts), not a formatted string."""
+    if raw.empty:
+        return pd.Series([], dtype=object)
+    return pd.Series(
+        [criteria_rows(row, config, option_right) for row in raw.to_dict("records")],
+        index=raw.index, dtype=object,
+    )
+
+
+def _compute_level_column(raw_df: pd.DataFrame, context: Optional[dict], option_right: str) -> pd.Series:
+    """Signed % distance of each row's strike from the context panel's
+    suggested strike — positive/green means this row clears the suggested
+    level (favorable), negative/red means it's on the wrong side of it.
+    Aligned to raw_df's index, which display_fn preserves, so this can be
+    attached to the display DataFrame as a plain new column."""
+    if raw_df.empty or "strike" not in raw_df.columns:
+        return pd.Series([], dtype=str)
+    suggested = (
+        (context or {}).get("suggested_call_strike") if option_right == "CALL"
+        else (context or {}).get("suggested_put_strike")
+    )
+    if not suggested:
+        return pd.Series(["-"] * len(raw_df), index=raw_df.index)
+
+    def _fmt(strike):
+        try:
+            strike = float(strike)
+        except (TypeError, ValueError):
+            return "-"
+        if pd.isna(strike):
+            return "-"
+        pct = ((strike - suggested) if option_right == "CALL" else (suggested - strike)) / suggested * 100
+        return f"{'+' if pct >= 0 else ''}{pct:.1f}%"
+
+    return raw_df["strike"].apply(_fmt)
+
+
+def _show_strategy_table(
+    display_df: pd.DataFrame, strategy: Strategy, data_version: str = "",
+    profile: str = "", filter_default: bool = True,
+) -> None:
+    """One strategy's rows for the one ticker already selected by the
+    Ticker picker — columns restricted to strategy.columns (the per-contract
+    fields; ticker-level info lives in the context panel instead)."""
     if display_df.empty:
         st.info("No data available.")
         return
 
-    all_tickers = sorted(display_df["Ticker"].unique()) if "Ticker" in display_df.columns else []
+    # Namespaced by data_version for the same reason the old _show_tab was —
+    # Streamlit only honors a widget's default= the first time its key is
+    # created, so a fresh run/profile needs fresh keys or stale filter
+    # selections leak across runs.
+    version_tag = "".join(ch for ch in str(data_version) if ch.isalnum()) or "v0"
+    widget_ns = f"{strategy.name}_{version_tag}"
 
-    # Determine which buckets have data
     bucket_counts: dict[str, int] = {"0–14 days": 0, "15–45 days": 0, "Long term (46d+)": 0}
     if "_dte_num" in display_df.columns:
         for n in display_df["_dte_num"]:
             bucket_counts[_dte_bucket(int(n))] += 1
     available_buckets = [b for b in _BUCKET_LABELS if bucket_counts[b] > 0]
 
-    # Widget keys are namespaced by data_version (the loaded report's run
-    # timestamp) so a fresh run gets fresh filter widgets. Streamlit only
-    # honors `default=` the first time a given key is created — on every
-    # later rerun it silently restores whatever was last selected for that
-    # key instead, so without this a new run's data would keep being
-    # filtered by stale selections from the previous report (or from a
-    # different profile) rather than showing everything by default.
-    version_tag = "".join(ch for ch in str(data_version) if ch.isalnum()) or "v0"
-    widget_ns = f"{key_prefix}_{version_tag}"
-
-    f1, f2, f3, f4 = st.columns([2, 2, 1.2, 0.9])
-    sel_tickers = f1.multiselect("Ticker", all_tickers, default=all_tickers, key=f"{widget_ns}_tickers")
-    sel_buckets = f2.multiselect(
-        "Expiration range",
-        available_buckets,
-        default=available_buckets,
+    f1, f2, f3, f4 = st.columns([1.7, 1, 0.8, 1.1])
+    sel_buckets = f1.multiselect(
+        "Expiration range", available_buckets, default=available_buckets,
         key=f"{widget_ns}_buckets",
     )
-    sort_by = f3.selectbox(
+    sort_by = f2.selectbox(
         "Sort by",
         ["Expiration (default)", "Annual Yield ↓", "Score ↓", "Premium ↓", "Delta ↑", "DTE ↑"],
         key=f"{widget_ns}_sort",
     )
-    f4.write("")  # vertical alignment with the labelled controls
-    yes_only = f4.toggle("✓ YES only", key=f"{widget_ns}_yesonly")
+    f3.write("")
+    yes_only = f3.toggle("✓ YES only", key=f"{widget_ns}_yesonly")
+    f4.write("")
+    clear_level = f4.toggle(
+        "Clear suggested strike", value=filter_default, key=f"{widget_ns}_clearlevel",
+        help="Only show strikes on the favorable side of the context panel's "
+             "suggested strike (the Level column). Default comes from this "
+             "profile's configuration and can be changed here — flip it and "
+             "it's saved as the new default.",
+    )
+    if profile and clear_level != filter_default:
+        save_profile(profile, {"filter_by_suggested_strike": clear_level})
 
     mask = pd.Series(True, index=display_df.index)
-    if "Ticker" in display_df.columns:
-        mask &= display_df["Ticker"].isin(sel_tickers)
     if "_dte_num" in display_df.columns and sel_buckets:
         mask &= display_df["_dte_num"].apply(lambda n: _dte_bucket(int(n)) in sel_buckets)
     if yes_only and "Rec" in display_df.columns:
         mask &= display_df["Rec"].astype(str).str.strip() == "Yes"
+    if clear_level and "Level" in display_df.columns:
+        mask &= display_df["Level"].astype(str).str.startswith("+")
 
     view = display_df[mask].reset_index(drop=True)
 
@@ -446,11 +588,16 @@ def _show_tab(display_df: pd.DataFrame, key_prefix: str, data_version: str = "")
         if col in view.columns:
             view = view.sort_values(col, ascending=asc).reset_index(drop=True)
 
+    keep = [c.key for c in strategy.columns if c.key in view.columns]
+    sort_helpers = [c for c in view.columns if c.startswith("_")]
+    rename_map = {c.key: c.label for c in strategy.columns if c.label and c.label != c.key}
+    table_df = view[keep + sort_helpers].rename(columns=rename_map)
+
     # Expiration group headers only make sense in expiration order
-    st.html(_render_html_table(view, group_by_expiration=not custom_sorted))
+    st.html(_render_html_table(table_df, group_by_expiration=not custom_sorted))
     st.caption(
         f"{len(view)} rows · YES/NO = recommendation verdict · banded rows = alternating "
-        "expiration groups · IVR* = HV-rank proxy (hover for source) · E⚠ = earnings before expiry"
+        "expiration groups · IVR* = HV-rank proxy (hover for source)"
     )
 
 
@@ -597,6 +744,7 @@ def _live_status_refresh() -> None:
         st.session_state.last_cc_recs_path = _disk["cc_recs_path"]
         st.session_state.last_csp_recs_path = _disk["csp_recs_path"]
         st.session_state.last_monthly_calls_path = _disk["monthly_calls_path"]
+        st.session_state.last_context_path = _disk["context_path"]
         st.session_state.last_run_timestamp = _disk["timestamp"]
         st.session_state.last_run_duration = None
         st.rerun()
@@ -804,6 +952,7 @@ for key, default in [
     ("last_cc_recs_path", None),
     ("last_csp_recs_path", None),
     ("last_monthly_calls_path", None),
+    ("last_context_path", None),
     ("last_run_timestamp", None),
     ("last_run_duration", None),
     ("is_running", False),
@@ -823,6 +972,7 @@ if st.session_state.last_run_ok is None:
         st.session_state.last_cc_recs_path = _meta.get("cc_recs_path")
         st.session_state.last_csp_recs_path = _meta.get("csp_recs_path")
         st.session_state.last_monthly_calls_path = _meta.get("monthly_calls_path")
+        st.session_state.last_context_path = _meta.get("context_path")
         st.session_state.last_run_timestamp = _meta.get("timestamp")
         st.session_state.last_run_duration = _meta.get("duration_s")
 
@@ -843,6 +993,7 @@ if not st.session_state.is_running:
         st.session_state.last_cc_recs_path = _disk["cc_recs_path"]
         st.session_state.last_csp_recs_path = _disk["csp_recs_path"]
         st.session_state.last_monthly_calls_path = _disk["monthly_calls_path"]
+        st.session_state.last_context_path = _disk["context_path"]
         st.session_state.last_run_timestamp = _disk["timestamp"]
         st.session_state.last_run_duration = None
 
@@ -1047,41 +1198,74 @@ if st.session_state.last_run_ok is False and not st.session_state.is_running:
     with st.expander("📝 Log", expanded=True):
         st.code(st.session_state.last_run_log or "(no log)", language=None)
 
-calls_raw = pd.DataFrame()
-puts_raw = pd.DataFrame()
-if st.session_state.last_run_ok:
-    calls_raw = _load_calls_view(
-        st.session_state.last_csv_path,
-        st.session_state.last_monthly_calls_path,
-        st.session_state.last_cc_recs_path,
-    )
-    puts_raw = _load_puts_view(
-        st.session_state.last_csv_path,
-        st.session_state.last_csp_recs_path,
-    )
-
-tab_calls, tab_puts, tab_perf, tab_day = st.tabs(
-    ["📈 Calls", "📉 Puts", "📊 Performance", "⚡ DayTrading"]
+tab_options, tab_perf, tab_day = st.tabs(
+    ["📈 Options", "📊 Performance", "⚡ DayTrading"]
 )
 
-# Ties each tab's filter widgets to the report actually being shown (profile +
-# run) so switching profiles or completing a new run starts filters fresh
-# instead of carrying over a stale ticker/expiration selection — see _show_tab.
+# Ties widget keys to the report actually being shown (profile + run) so
+# switching profiles or completing a new run starts filters fresh instead of
+# carrying over a stale ticker/expiration selection — see _show_strategy_table.
 _data_version = f"{profile}_{st.session_state.last_run_timestamp or ''}"
 
-with tab_calls:
-    if st.session_state.last_run_ok:
-        calls_display = _build_calls_display(calls_raw) if not calls_raw.empty else pd.DataFrame()
-        _show_tab(calls_display, "calls", data_version=_data_version)
+with tab_options:
+    if not st.session_state.last_run_ok:
+        st.info("Run the screener to see option candidates.")
     else:
-        st.info("Run the screener to see call candidates.")
+        strategy_list = list(STRATEGIES.values())
+        p1, p2 = st.columns([1, 1])
+        sel_display_name = p1.selectbox(
+            "Strategy", [s.display_name for s in strategy_list],
+            key=f"opt_strategy_{_data_version}",
+        )
+        strategy = next(s for s in strategy_list if s.display_name == sel_display_name)
 
-with tab_puts:
-    if st.session_state.last_run_ok:
-        puts_display = _build_puts_display(puts_raw) if not puts_raw.empty else pd.DataFrame()
-        _show_tab(puts_display, "puts", data_version=_data_version)
-    else:
-        st.info("Run the screener to see put candidates.")
+        recs_path = st.session_state.get(strategy.recs_state_key)
+        tickers: list[str] = []
+        if recs_path and Path(recs_path).exists():
+            recs_df = pd.read_csv(recs_path)
+            if "ticker" in recs_df.columns:
+                tickers = sorted(recs_df["ticker"].dropna().astype(str).unique().tolist())
+
+        if not tickers:
+            p2.write("")
+            st.info(f"No {strategy.display_name} results in the latest run.")
+        else:
+            sel_ticker = p2.selectbox(
+                "Ticker", tickers, key=f"opt_ticker_{_data_version}_{strategy.name}",
+            )
+            context_store = _load_context_store()
+            context = context_store.get(sel_ticker)
+            _render_context_panel(context, sel_ticker, strategy.option_right)
+            st.divider()
+
+            raw = _load_strategy_view(strategy)
+            if not raw.empty and "ticker" in raw.columns:
+                raw = raw[raw["ticker"].astype(str) == sel_ticker]
+            if raw.empty:
+                display_df = pd.DataFrame()
+            else:
+                display_df = strategy.display_fn(raw)
+                display_df["Level"] = _compute_level_column(raw, context, strategy.option_right)
+                # Hover-tooltip content for the Rec and Score cells (see
+                # _render_html_table) — not shown as visible columns, so they
+                # ride along as hidden (_-prefixed) fields instead of adding
+                # to strategy.columns. _verdict_why reuses display_fn's own
+                # "Why" column (the recommender's verdict reason when this row
+                # got promoted to a term's pick, or the score breakdown
+                # otherwise); _score_why is why_ranked_high straight from the
+                # raw candidate row, always the score breakdown regardless of
+                # verdict status. _compare_why is the plain-English "why is
+                # this a better/worse trade than its neighbors" sentence
+                # (agent.scoring.explain) — the actual tooltip content; the
+                # other two are only a fallback for a single-row peer group.
+                display_df["_verdict_why"] = display_df.get("Why", "")
+                display_df["_score_why"] = raw.get("why_ranked_high", "")
+                display_df["_compare_why"] = _attach_comparison_explanations(raw, strategy.option_right)
+                display_df["_criteria"] = _attach_criteria(raw, cfg, strategy.option_right)
+            _show_strategy_table(
+                display_df, strategy, data_version=_data_version, profile=profile,
+                filter_default=bool(cfg.get("filter_by_suggested_strike", True)),
+            )
 
 with tab_perf:
     _show_performance(cfg)
@@ -1141,11 +1325,13 @@ if st.session_state.should_run and st.session_state.pending_run_config is not No
     cc_recs_p = report_dir / f"{today_str}_cc_recs.csv"
     csp_recs_p = report_dir / f"{today_str}_csp_recs.csv"
     monthly_p = report_dir / f"{today_str}_monthly_calls.csv"
+    context_p = report_dir / f"{today_str}_context.json"
 
     st.session_state.last_csv_path = str(csv_p) if csv_p.exists() else None
     st.session_state.last_cc_recs_path = str(cc_recs_p) if cc_recs_p.exists() else None
     st.session_state.last_csp_recs_path = str(csp_recs_p) if csp_recs_p.exists() else None
     st.session_state.last_monthly_calls_path = str(monthly_p) if monthly_p.exists() else None
+    st.session_state.last_context_path = str(context_p) if context_p.exists() else None
 
     if ok:
         log_placeholder.empty()
@@ -1159,6 +1345,7 @@ if st.session_state.should_run and st.session_state.pending_run_config is not No
             "cc_recs_path": st.session_state.last_cc_recs_path,
             "csp_recs_path": st.session_state.last_csp_recs_path,
             "monthly_calls_path": st.session_state.last_monthly_calls_path,
+            "context_path": st.session_state.last_context_path,
             "timestamp": timestamp,
             "duration_s": duration_s,
         })
