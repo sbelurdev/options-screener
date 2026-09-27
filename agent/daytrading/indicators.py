@@ -2,8 +2,12 @@
 Indicator maths — PURE functions over DataFrames. No network, no I/O, no clock.
 
 Daily:    MACD(12,26,9), RSI(14) Wilder, ATR(14) Wilder, SMA(20), avg volume(20)
+          — daily RSI/MACD are context only now, shown but never gating; see
+          signals.evaluate_daily_gate.
 Intraday: opening range, session VWAP (anchored 09:30), overnight high/low,
-          time-of-day volume baseline
+          time-of-day volume baseline, RSI(14) on 5-minute bars and again on
+          bars resampled to 15-minute (intraday_rsi) — this is the real
+          momentum gate, checked in signals.evaluate_trigger.
 
 All exponential and Wilder smoothing uses `adjust=False`, matching what charting
 platforms display. See spec §6.1 and §6.2.
@@ -21,7 +25,7 @@ only — see `overnight_levels`, which reports the window it actually used.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 from typing import Dict, Optional, Tuple
 
 import numpy as np
@@ -202,6 +206,51 @@ def session_bars(bars_et: pd.DataFrame, day: date) -> pd.DataFrame:
     if same_day.empty:
         return same_day
     return same_day.between_time(RTH_START, RTH_LAST_BAR)
+
+
+def intraday_rsi(bars: pd.DataFrame, resample: Optional[str] = None, n: int = 14) -> pd.Series:
+    """Wilder RSI(n) on `bars`' Close, optionally resampled first (e.g.
+    "15min" for a 15-minute reading built from 5-minute bars).
+
+    Takes the FULL multi-day intraday series (TickerData.intraday, not the
+    single-session `rth` slice) — a same-day-only series has at most a
+    handful of bars before mid-morning, nowhere near enough for a stable
+    14-period Wilder reading. Using the rolling multi-day history means a
+    valid RSI exists from the very first tradeable bar of the day, the same
+    way any charting platform's intraday RSI works across session
+    boundaries rather than resetting to zero at each open.
+
+    The resampled series is left-labelled (a bin labelled 09:30 covers
+    09:30-09:45, matching the 5-minute convention this module already
+    uses) — callers reading a still-forming bin must use
+    `last_completed_value` below, not a raw index lookup, or they risk
+    reading a bin before its data has actually finished arriving.
+    """
+    if bars is None or bars.empty:
+        return pd.Series(dtype=float)
+    close = bars["Close"]
+    if resample:
+        agg = bars.resample(resample, label="left", closed="left").agg(
+            {"Close": "last"}
+        ).dropna(subset=["Close"])
+        close = agg["Close"]
+    return rsi(close, n)
+
+
+def last_completed_value(
+    series: pd.Series, as_of: datetime, bar_duration: timedelta
+) -> Optional[float]:
+    """The most recent entry in a left-labelled `series` whose bin has fully
+    completed by `as_of` — mirrors signals.completed_bars' exact rule
+    (label + duration <= as_of) so a still-forming bin (e.g. a 15-minute bin
+    only 5 or 10 minutes into its window) is never read early."""
+    if series is None or series.empty:
+        return None
+    complete = series[series.index + bar_duration <= as_of]
+    if complete.empty:
+        return None
+    val = complete.iloc[-1]
+    return float(val) if pd.notna(val) else None
 
 
 @dataclass(frozen=True)

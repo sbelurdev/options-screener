@@ -26,7 +26,7 @@ def test_defaults_match_spec():
     # deliberate edits to the default list do not fail the threshold checks below.
     assert c.watchlist == dc.DEFAULT_WATCHLIST
     assert {"SPY", "QQQ", "AAPL", "GOOGL", "AMZN", "META", "TSLA"} <= set(c.watchlist)
-    assert (c.rsi_min, c.rsi_max) == (50.0, 75.0)
+    assert c.intraday_rsi_threshold == 60.0
     assert (c.dte_min, c.dte_max) == (3, 5)
     assert (c.delta_min, c.delta_target, c.delta_max) == (0.60, 0.65, 0.70)
     assert c.max_spread_pct_of_mid == 0.03
@@ -41,6 +41,10 @@ def test_defaults_match_spec():
     assert c.require_market_gate is False
     # MACD was removed as a gate entirely — no config field should remain
     assert not hasattr(c, "require_macd_above_signal")
+    # Daily RSI band was replaced by the intraday (5m/15m) momentum check —
+    # no daily-band config field should remain either
+    assert not hasattr(c, "rsi_min")
+    assert not hasattr(c, "rsi_max")
 
 
 def test_exclusions_are_removed_from_the_evaluated_list():
@@ -54,15 +58,16 @@ def test_exclusions_are_removed_from_the_evaluated_list():
 
 def test_from_dict_normalises_case_and_ignores_unknown_keys():
     c = dc.from_dict({"watchlist": ["aapl", " tsla "], "exclusions": {"msft": "held"},
-                      "rsi_min": 55.0, "not_a_real_key": 1})
+                      "intraday_rsi_threshold": 65.0, "not_a_real_key": 1})
     assert c.watchlist == ["AAPL", "TSLA"]
     assert c.exclusions == {"MSFT": "held"}
-    assert c.rsi_min == 55.0
+    assert c.intraday_rsi_threshold == 65.0
 
 
 def test_validate_catches_inverted_and_out_of_range_settings():
     assert dc.DayTradingConfig().validate() == []
-    assert any("rsi_min" in p for p in dc.DayTradingConfig(rsi_min=80, rsi_max=70).validate())
+    assert any("intraday_rsi_threshold" in p
+              for p in dc.DayTradingConfig(intraday_rsi_threshold=150).validate())
     assert any("delta_min" in p for p in dc.DayTradingConfig(delta_min=0.8, delta_max=0.6).validate())
     assert any("delta_target" in p for p in dc.DayTradingConfig(delta_target=0.9).validate())
     assert any("dte_min" in p for p in dc.DayTradingConfig(dte_min=9, dte_max=5).validate())
@@ -73,11 +78,11 @@ def test_round_trip_through_profile_yaml(tmp_path, monkeypatch):
     monkeypatch.setattr(dc, "load_merged_config",
                         lambda p: {"daytrading": {"watchlist": ["AAPL"],
                                                   "exclusions": {"MSFT": "employer"},
-                                                  "rsi_min": 55.0}})
+                                                  "intraday_rsi_threshold": 65.0}})
     c = dc.load_config("someone")
     assert c.watchlist == ["AAPL"]
     assert c.exclusions == {"MSFT": "employer"}
-    assert c.rsi_min == 55.0
+    assert c.intraday_rsi_threshold == 65.0
 
 
 def test_save_writes_under_the_daytrading_key(monkeypatch):
@@ -137,9 +142,15 @@ def _intraday(open_px, breakout=True, overnight_px=None):
          "Volume": vol}, index=idx)
 
 
-def _td(gap: float = 1.0, breakout: bool = True):
-    """TickerData whose open gaps `gap` above the prior raw close."""
-    daily = _daily()
+def _td(gap: float = 1.0, breakout: bool = True, up: bool = True):
+    """TickerData whose open gaps `gap` above the prior raw close.
+
+    `up=False` gives a genuinely downtrending daily series (close below its
+    own trend MA) — the deterministic way to force Stage A's daily gate to
+    fail now that it has only one real lever (require_close_above_trend_ma);
+    RSI no longer gates Stage A at all.
+    """
+    daily = _daily(up=up)
     prev_close = float(daily["Close"].iloc[-1])
     return TickerData(
         ticker="AAPL", daily_adj=daily, daily_raw=daily,
@@ -254,13 +265,12 @@ def test_daily_gate_still_evaluated_when_market_closed():
 
 
 def test_failing_daily_gate_pre_open_shows_gate_fail():
-    cfg = dc.DayTradingConfig(watchlist=["AAPL"], rsi_min=90, rsi_max=99,
-                              block_on_earnings_in_window=False)
-    ev = evaluate_ticker("AAPL", _td(), cfg, date(2026, 8, 29),
+    cfg = dc.DayTradingConfig(watchlist=["AAPL"], block_on_earnings_in_window=False)
+    ev = evaluate_ticker("AAPL", _td(up=False), cfg, date(2026, 8, 29),
                          datetime(2026, 8, 29, 23, 10, tzinfo=ET))
     assert ev.session_pending and not ev.degraded
     assert "GATE FAIL" in ev.status_chip()
-    assert "rsi_14" in ev.blocking_reason()
+    assert "close_above_sma20" in ev.blocking_reason()
 
 
 def test_genuine_data_failure_still_degrades_when_market_closed():
@@ -318,12 +328,11 @@ def test_rationale_explains_every_evaluated_stage():
 
 
 def test_rationale_states_the_failing_condition_when_gate_fails():
-    cfg = dc.DayTradingConfig(watchlist=["AAPL"], rsi_min=90, rsi_max=99,
-                              block_on_earnings_in_window=False)
-    ev = evaluate_ticker("AAPL", _td(), cfg, DAY, datetime(2026, 8, 28, 10, 30, tzinfo=ET))
+    cfg = dc.DayTradingConfig(watchlist=["AAPL"], block_on_earnings_in_window=False)
+    ev = evaluate_ticker("AAPL", _td(up=False), cfg, DAY, datetime(2026, 8, 28, 10, 30, tzinfo=ET))
     daily = next(v for k, v in dict(ev.rationale()).items() if "Daily gate" in k)
     assert "gate failed" in str(dict(ev.rationale()).keys()) or True
-    assert "rsi_14" in daily
+    assert "close_above_sma20" in daily
 
 
 def test_rationale_omits_stages_that_never_ran():
@@ -444,7 +453,7 @@ def test_daily_gate_condition_name_reflects_the_configured_ma():
         macd_signal=0.5, macd_hist=0.5, trend_ma=108.0, trend_ma_label="EMA9",
         atr_14=2.0, avg_volume_20=1e6, trend_ma_distance_pct=0.02,
     )
-    r = sig.evaluate_daily_gate(di, rsi_min=50, rsi_max=75)
+    r = sig.evaluate_daily_gate(di)
     names = {c.name for c in r.conditions}
     assert "close_above_ema9" in names
     assert "close_above_sma20" not in names
@@ -493,7 +502,7 @@ def test_criteria_rows_for_a_ready_ticker_carries_gate_and_setup_conditions():
     rows = build_criteria_rows({"AAPL": ev}, poll_rows, cfg)
     r = rows[0]
     assert r.ticker == "AAPL"
-    assert r.rsi is not None and r.rsi.name == "rsi_14"
+    assert r.rsi is not None and r.rsi.name == "rsi_momentum_5m_or_15m"
     assert r.trend_ma is not None and r.trend_ma.name.startswith("close_above_")
     assert r.gap is not None and r.gap.name == "gap_up"
     # Fired -> trigger conditions come from the frozen firing bar, all passed
@@ -502,18 +511,21 @@ def test_criteria_rows_for_a_ready_ticker_carries_gate_and_setup_conditions():
 
 
 def test_criteria_rows_stopped_ticker_has_no_trigger_conditions():
-    """A daily-gate failure means Stage C never ran - the four trigger fields
-    are None, not FAIL. Stage B (gap) runs independently once the session is
-    open, so it IS populated even though the daily gate already failed."""
-    cfg = dc.DayTradingConfig(watchlist=["AAPL"], rsi_min=90, rsi_max=99,
-                              block_on_earnings_in_window=False)
-    ev = evaluate_ticker("AAPL", _td(), cfg, DAY, datetime(2026, 8, 28, 10, 30, tzinfo=ET))
+    """A daily-gate failure means Stage C never ran - the actual trigger fields
+    (rsi, or_high, vwap, volume) are None, not FAIL. Stage B (gap) runs
+    independently once the session is open, so it IS populated even though
+    the daily gate already failed. Overnight-high is informational-only and
+    computed straight off session bars whenever they exist, independent of
+    every gate - so it IS populated here too."""
+    cfg = dc.DayTradingConfig(watchlist=["AAPL"], block_on_earnings_in_window=False)
+    ev = evaluate_ticker("AAPL", _td(up=False), cfg, DAY, datetime(2026, 8, 28, 10, 30, tzinfo=ET))
     poll_rows = [PollRow("AAPL", False, "daily gate failed", "stopped")]
     rows = build_criteria_rows({"AAPL": ev}, poll_rows, cfg)
     r = rows[0]
-    assert r.rsi is not None and not r.rsi.passed
+    assert r.rsi is None  # Stage C (where RSI now lives) never ran
     assert r.gap is not None  # Stage B does not depend on Stage A
-    assert r.or_high is None and r.overnight_high is None
+    assert r.or_high is None  # Stage C never ran
+    assert r.overnight_high is not None and r.overnight_high.informational
     assert r.vwap is None and r.volume is None
 
 

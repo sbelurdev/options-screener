@@ -104,7 +104,7 @@ _CRITERIA_COLS = [
     ("Earnings", "earnings"),
     ("Gap Up", "gap"),
     (">OR High", "or_high"),
-    (">Overnight High", "overnight_high"),
+    ("Overnight High (info)", "overnight_high"),
     (">VWAP", "vwap"),
     ("Vol>OR Avg", "volume"),
 ]
@@ -134,16 +134,23 @@ def _crit_cell(cond) -> str:
     tab. `None` (the check never ran) is rendered as '-', which must never be
     confused with FAIL: a ticker that failed its daily gate shows '-' for the
     trigger columns because Stage C never started, not because it lost there.
+
+    An `informational` condition (overnight high, since it stopped gating the
+    trigger) never shows PASS/FAIL — 'INFO' plus an explicit "(not
+    considered)" note, so it reads as context, never as a criterion that was
+    checked and happened to succeed.
     """
     if cond is None:
         return "-"
-    status = "PASS" if cond.passed else "FAIL"
+    info = getattr(cond, "informational", False)
+    status = "INFO" if info else ("PASS" if cond.passed else "FAIL")
+    suffix = " (not considered)" if info else ""
     if cond.threshold is not None and cond.actual is not None:
         fmt = ",.0f" if "volume" in cond.name else ",.2f"
         op = ">" if cond.actual >= cond.threshold else "<"
-        return f"{status} {format(cond.actual, fmt)} {op} {format(cond.threshold, fmt)}"
+        return f"{status} {format(cond.actual, fmt)} {op} {format(cond.threshold, fmt)}{suffix}"
     if cond.actual is not None:
-        return f"{status} {cond.actual:,.4g}"
+        return f"{status} {cond.actual:,.4g}{suffix}"
     if not cond.passed and cond.detail:
         return f"{status} ({cond.detail})"
     return status

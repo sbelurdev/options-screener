@@ -105,6 +105,11 @@ class TickerEvaluation:
 
     opening_range: Optional[ind.OpeningRange] = None
     overnight: Optional[ind.OvernightLevels] = None
+    # Overnight high vs the latest close, as an INFORMATIONAL condition only
+    # — removed as a trigger requirement (see signals.evaluate_trigger), but
+    # still worth seeing in the criteria table. Populated whenever ev.rth has
+    # at least one bar, independent of whether Stage A/B/C actually ran.
+    overnight_info: Optional[sig.Condition] = None
     vwap: Optional[pd.Series] = None
     rth: Optional[pd.DataFrame] = None
     volume_baseline: Optional[pd.Series] = None
@@ -424,7 +429,9 @@ def build_criteria_rows(
     """
     by_ticker = {r.ticker: r for r in poll_rows}
     label = f"{cfg.trend_ma_type.upper()}{cfg.trend_ma_period}"
-    rsi_band = f"{cfg.rsi_min:g}-{cfg.rsi_max:g}"
+    # RSI moved from a daily-gate band to an intraday (5m-or-15m) momentum
+    # check in Stage C — same field name, now sourced from trigger conditions.
+    rsi_band = f">{cfg.intraday_rsi_threshold:g}"
     rows: List[CriteriaRow] = []
 
     for t in sorted(evals):
@@ -453,12 +460,12 @@ def build_criteria_rows(
             reason=reason,
             trend_ma_label=label,
             rsi_band=rsi_band,
-            rsi=_find_condition(daily_conds, "rsi_14"),
+            rsi=_find_condition(trig_conds, "rsi_momentum_5m_or_15m"),
             trend_ma=_find_condition(daily_conds, "close_above_"),
             earnings=_find_condition(daily_conds, "no_earnings_in_window"),
             gap=_find_condition(setup_conds, "gap_up"),
             or_high=_find_condition(trig_conds, "close_above_or_high"),
-            overnight_high=_find_condition(trig_conds, "close_above_overnight_high"),
+            overnight_high=ev.overnight_info,
             vwap=_find_condition(trig_conds, "close_above_vwap"),
             volume=_find_condition(trig_conds, "volume_above_or_avg"),
         ))
@@ -503,7 +510,6 @@ def evaluate_ticker(
                 ind.daily_indicators(td.daily_adj, cfg.trend_ma_type, cfg.trend_ma_period))
     ev.daily_gate = sig.evaluate_daily_gate(
         ev.daily,
-        rsi_min=cfg.rsi_min, rsi_max=cfg.rsi_max,
         require_close_above_trend_ma=cfg.require_close_above_trend_ma,
         earnings_date=earnings_date, option_expiry=option_expiry,
         block_on_earnings_in_window=cfg.block_on_earnings_in_window,
@@ -520,6 +526,20 @@ def evaluate_ticker(
     ev.overnight = ind.overnight_levels(bars, prev, day) if prev else None
     ev.volume_baseline = (static.volume_baseline if static is not None
                           else ind.time_of_day_volume_baseline(bars, day))
+
+    # Overnight-high context, independent of Stage A/B/C — shown whenever
+    # there's at least one RTH bar to compare against, whether or not the
+    # gates passed or Stage C ever ran.
+    if (ev.overnight is not None and ev.overnight.overnight_high is not None
+            and ev.rth is not None and not ev.rth.empty):
+        last_close = float(ev.rth["Close"].iloc[-1])
+        on_high = ev.overnight.overnight_high
+        ev.overnight_info = sig.Condition(
+            "overnight_high_info", True, last_close,
+            f"vs overnight_high {on_high:.2f}",
+            detail="informational only - not required for a signal to fire",
+            threshold=on_high, informational=True,
+        )
 
     # Before the open there is legitimately no intraday session data. Stop here
     # rather than running Stage B against nothing, which would report a missing
@@ -551,12 +571,18 @@ def evaluate_ticker(
             ev.halted = True
 
         if ev.daily_gate.passed and ev.setup.passed and not ev.halted:
+            # Momentum from the FULL multi-day intraday series (bars), not
+            # ev.rth (today's session only) — a same-day-only RSI has no
+            # warm-up before mid-morning. See indicators.intraday_rsi.
+            rsi_5m = ind.intraday_rsi(bars)
+            rsi_15m = ind.intraday_rsi(bars, resample="15min")
             ev.trigger = sig.evaluate_trigger(
                 ticker, ev.rth, now,
                 opening_range=ev.opening_range, overnight=ev.overnight,
                 vwap=ev.vwap, day=day,
                 trigger_start=cfg.trigger_start, trigger_cutoff=cfg.trigger_cutoff,
                 volume_baseline=ev.volume_baseline, already_fired=already_fired,
+                rsi_5m=rsi_5m, rsi_15m=rsi_15m, rsi_threshold=cfg.intraday_rsi_threshold,
             )
     return ev
 
@@ -1012,7 +1038,9 @@ def _render_criteria(rows: List["CriteriaRow"]) -> None:
         "The same table sent in every DayTrading email - one row per ticker, one "
         "column per gate/trigger criterion, live as of this render. Cells read "
         "PASS/FAIL actual vs threshold, e.g. \"FAIL 730.59 < 731.40\", so a miss "
-        "is self-explanatory without cross-referencing another panel."
+        "is self-explanatory without cross-referencing another panel. Overnight "
+        "High reads INFO instead — it's shown for context but no longer required "
+        "for a signal to fire."
     )
     if not rows:
         st.info("No tickers evaluated yet.")
@@ -1021,7 +1049,7 @@ def _render_criteria(rows: List["CriteriaRow"]) -> None:
     rsi_h = f"RSI ({rows[0].rsi_band})"
     ma_h = rows[0].trend_ma_label
     headers = ["Ticker", "Monitored", rsi_h, ma_h, "Earnings", "Gap Up",
-              ">OR High", ">Overnight High", ">VWAP", "Vol>OR Avg", "Reason"]
+              ">OR High", "Overnight High (info)", ">VWAP", "Vol>OR Avg", "Reason"]
     body = []
     for r in rows:
         body.append({
@@ -1032,7 +1060,7 @@ def _render_criteria(rows: List["CriteriaRow"]) -> None:
             "Earnings": escape(crit_cell(r.earnings)),
             "Gap Up": escape(crit_cell(r.gap)),
             ">OR High": escape(crit_cell(r.or_high)),
-            ">Overnight High": escape(crit_cell(r.overnight_high)),
+            "Overnight High (info)": escape(crit_cell(r.overnight_high)),
             ">VWAP": escape(crit_cell(r.vwap)),
             "Vol>OR Avg": escape(crit_cell(r.volume)),
             "Reason": escape(r.reason),

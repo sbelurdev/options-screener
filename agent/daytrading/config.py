@@ -28,9 +28,8 @@ class DayTradingConfig:
     exclusions: Dict[str, str] = field(default_factory=dict)  # ticker -> reason
 
     # Daily name gate. MACD is not a gate — it is computed and displayed as
-    # context only, and never blocks a name.
-    rsi_min: float = 50.0
-    rsi_max: float = 75.0
+    # context only, and never blocks a name. Daily RSI is likewise
+    # context-only now (see intraday_rsi_threshold below for the real gate).
     require_close_above_trend_ma: bool = True
     # Trend filter. A shorter/exponential average turns faster but sits closer
     # to price, which in a rising market makes this gate STRICTER, not looser.
@@ -42,6 +41,14 @@ class DayTradingConfig:
     or_end: str = "09:40"  # inclusive; the 09:30, 09:35, 09:40 bars
     trigger_start: str = "09:45"
     trigger_cutoff: str = "11:00"  # no entries after this
+
+    # Momentum: RSI(14) on the intraday series itself (not the daily gate's
+    # series), computed on 5-minute bars and again on bars resampled to
+    # 15-minute — a firing bar must clear this on at least one of the two.
+    # Uses the rolling multi-day intraday history (not just today) so a
+    # valid 14-period reading exists from the first tradeable bar, rather
+    # than warming up from zero at the open.
+    intraday_rsi_threshold: float = 60.0
 
     # Polling window (ET). Wider than the trigger window on purpose: before the
     # open it keeps overnight_high current, and after the cutoff it tracks an
@@ -111,10 +118,8 @@ class DayTradingConfig:
     def validate(self) -> List[str]:
         """Return a list of human-readable problems; empty means usable."""
         problems: List[str] = []
-        if not 0 <= self.rsi_min <= 100 or not 0 <= self.rsi_max <= 100:
-            problems.append("RSI bounds must be within 0-100")
-        if self.rsi_min > self.rsi_max:
-            problems.append(f"rsi_min ({self.rsi_min}) must be <= rsi_max ({self.rsi_max})")
+        if not 0 <= self.intraday_rsi_threshold <= 100:
+            problems.append("intraday_rsi_threshold must be within 0-100")
         if self.delta_min > self.delta_max:
             problems.append(f"delta_min ({self.delta_min}) must be <= delta_max ({self.delta_max})")
         if not self.delta_min <= self.delta_target <= self.delta_max:

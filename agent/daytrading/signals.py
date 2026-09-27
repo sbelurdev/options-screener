@@ -30,6 +30,7 @@ from agent.daytrading.indicators import (
     DailyIndicators,
     OpeningRange,
     OvernightLevels,
+    last_completed_value,
     relative_volume,
 )
 
@@ -54,6 +55,10 @@ class Condition:
     expected: str          # human-readable, e.g. "50.0 <= rsi <= 75.0"
     detail: str = ""
     threshold: Optional[float] = None
+    # True for a value shown for context only — never required for a gate or
+    # the trigger to pass, and never rendered as PASS/FAIL (see overnight high,
+    # removed as a trigger condition but still worth seeing at a glance).
+    informational: bool = False
 
     def describe(self) -> str:
         act = "n/a" if self.actual is None else f"{self.actual:,.4g}"
@@ -86,8 +91,6 @@ class GateResult:
 def evaluate_daily_gate(
     ind: Optional[DailyIndicators],
     *,
-    rsi_min: float,
-    rsi_max: float,
     require_close_above_trend_ma: bool = True,
     earnings_date: Optional[date] = None,
     option_expiry: Optional[date] = None,
@@ -95,28 +98,23 @@ def evaluate_daily_gate(
 ) -> GateResult:
     """Stage A, evaluated on the prior completed session.
 
-    MACD is deliberately NOT a gate condition. It is still computed and shown as
-    context in the readiness panel, but it never blocks a name — so it is also
-    absent from the required-data check below, otherwise a missing MACD would
-    degrade a ticker over an indicator that decides nothing.
+    MACD and daily RSI are deliberately NOT gate conditions. Both are still
+    computed and shown as context in the readiness panel, but neither blocks
+    a name — momentum is now checked intraday instead (see evaluate_trigger's
+    rsi_5m/rsi_15m). Both are also absent from the required-data check below,
+    otherwise a missing one would degrade a ticker over an indicator that
+    decides nothing.
     """
     if ind is None:
         return GateResult(False, [], degraded_reason="no daily indicators available")
 
-    missing = [
-        n for n, v in (("rsi_14", ind.rsi_14), ("trend_ma", ind.trend_ma)) if v is None
-    ]
+    missing = [n for n, v in (("trend_ma", ind.trend_ma),) if v is None]
     if missing:
         return GateResult(
             False, [], degraded_reason=f"daily indicators incomplete: {', '.join(missing)}"
         )
 
-    conds: List[Condition] = [
-        Condition(
-            "rsi_14", rsi_min <= ind.rsi_14 <= rsi_max, ind.rsi_14,
-            f"{rsi_min:g} <= rsi <= {rsi_max:g}",
-        )
-    ]
+    conds: List[Condition] = []
 
     if require_close_above_trend_ma:
         label = ind.trend_ma_label or "trend MA"
@@ -252,11 +250,26 @@ def evaluate_trigger(
     trigger_cutoff: str = "11:00",
     volume_baseline: Optional[pd.Series] = None,
     already_fired: Optional[TriggerFire] = None,
+    rsi_5m: Optional[pd.Series] = None,
+    rsi_15m: Optional[pd.Series] = None,
+    rsi_threshold: float = 60.0,
 ) -> TriggerResult:
     """Stage C. Scans completed bars in [trigger_start, cutoff] and fires once.
 
     All four conditions must hold on the SAME bar:
-        close > or_high, close > overnight_high, close > vwap, volume > or_avg_vol
+        close > or_high, close > vwap, volume > or_avg_vol,
+        and RSI(5m) > rsi_threshold OR RSI(15m) > rsi_threshold.
+
+    Overnight high is NOT a condition here — it's informational only now
+    (see views.evaluate_ticker's overnight_info), shown in the criteria
+    table but never required for a signal to fire. It's still recorded on
+    a firing bar's TriggerFire for display, though.
+
+    rsi_5m/rsi_15m come from indicators.intraday_rsi() over the FULL
+    multi-day intraday series (not this function's `rth`, which is just
+    today's session) — a same-day-only RSI has no warm-up before mid-morning.
+    rsi_15m is left-labelled and read via indicators.last_completed_value so
+    a still-forming 15-minute bin is never used early.
     """
     now_et = require_et(now_et, "now_et")
 
@@ -295,14 +308,6 @@ def evaluate_trigger(
             Condition("close_above_or_high", close > opening_range.or_high, close,
                       f"> or_high {opening_range.or_high:.2f}",
                       threshold=opening_range.or_high),
-            Condition(
-                "close_above_overnight_high",
-                (on_high is None) or (close > on_high), close,
-                f"> overnight_high {on_high:.2f}" if on_high is not None
-                else "no overnight level (not blocking)",
-                detail="" if on_high is not None else "overnight bars unavailable",
-                threshold=on_high,
-            ),
             Condition("close_above_vwap",
                       vwap_here is not None and close > vwap_here, close,
                       f"> vwap {vwap_here:.2f}" if vwap_here is not None else "> vwap (unavailable)",
@@ -311,6 +316,19 @@ def evaluate_trigger(
                       f"> or_avg_volume {opening_range.or_avg_volume:,.0f}",
                       threshold=opening_range.or_avg_volume),
         ]
+
+        r5 = (float(rsi_5m.loc[ts]) if rsi_5m is not None and ts in rsi_5m.index
+             and pd.notna(rsi_5m.loc[ts]) else None)
+        r15 = last_completed_value(rsi_15m, ts, timedelta(minutes=15)) if rsi_15m is not None else None
+        momentum_ok = (r5 is not None and r5 > rsi_threshold) or (r15 is not None and r15 > rsi_threshold)
+        momentum_actual = max(v for v in (r5, r15) if v is not None) if (r5 is not None or r15 is not None) else None
+        conds.append(Condition(
+            "rsi_momentum_5m_or_15m", momentum_ok, momentum_actual,
+            f"RSI(5m) or RSI(15m) > {rsi_threshold:g}",
+            detail=(f"RSI5={r5:.1f}" if r5 is not None else "RSI5=n/a")
+                  + ", " + (f"RSI15={r15:.1f}" if r15 is not None else "RSI15=n/a"),
+            threshold=rsi_threshold,
+        ))
         last_conditions = conds
         last_bar_time = ts
 

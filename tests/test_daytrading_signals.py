@@ -41,53 +41,57 @@ def _bars(day, closes, volumes, start="09:30"):
 # ── Stage A: daily gate ──────────────────────────────────────────────────────
 
 def test_daily_gate_passes_and_reports_all_conditions():
-    r = sig.evaluate_daily_gate(_di(), rsi_min=50, rsi_max=75)
+    r = sig.evaluate_daily_gate(_di())
     assert r.passed and not r.degraded
-    assert {c.name for c in r.conditions} >= {"rsi_14", "close_above_sma20"}
+    assert {c.name for c in r.conditions} >= {"close_above_sma20"}
     # label is derived from trend_ma_label, e.g. SMA20 -> close_above_sma20
     assert "macd_above_signal" not in {c.name for c in r.conditions}, (
         "MACD was removed as a gate condition; it is context only"
     )
+    assert "rsi_14" not in {c.name for c in r.conditions}, (
+        "daily RSI was removed as a gate condition; momentum is now checked "
+        "intraday in evaluate_trigger (rsi_momentum_5m_or_15m)"
+    )
 
 
-@pytest.mark.parametrize("rsi,ok", [(49.9, False), (50.0, True), (75.0, True), (75.1, False)])
-def test_daily_gate_rsi_band_is_inclusive(rsi, ok):
-    assert sig.evaluate_daily_gate(_di(rsi_14=rsi), rsi_min=50, rsi_max=75).passed is ok
-
-
-def test_daily_gate_failure_names_the_condition_and_actual_value():
-    r = sig.evaluate_daily_gate(_di(rsi_14=80.0), rsi_min=50, rsi_max=75)
-    assert not r.passed
-    f = r.first_failure()
-    assert f.name == "rsi_14"
-    assert f.actual == pytest.approx(80.0)
-    assert "80" in f.describe()
+def test_daily_rsi_never_blocks_regardless_of_value():
+    """Daily RSI is context-only now (see indicators.DailyIndicators.rsi_14
+    still being computed and shown in the readiness panel) - it must never
+    fail Stage A no matter how extreme."""
+    for rsi in (0.0, 49.9, 80.1, 100.0):
+        assert sig.evaluate_daily_gate(_di(rsi_14=rsi)).passed
 
 
 def test_macd_below_signal_no_longer_blocks():
     """MACD was removed as a gate; a bearish MACD must not fail an otherwise good name."""
-    r = sig.evaluate_daily_gate(_di(macd_line=0.1, macd_signal=0.9, macd_hist=-0.8),
-                                rsi_min=50, rsi_max=75)
+    r = sig.evaluate_daily_gate(_di(macd_line=0.1, macd_signal=0.9, macd_hist=-0.8))
     assert r.passed
     assert not any(c.name == "macd_above_signal" for c in r.conditions)
 
 
 def test_missing_macd_does_not_degrade_the_gate():
     """MACD decides nothing, so its absence must not mark a ticker degraded."""
-    r = sig.evaluate_daily_gate(_di(macd_line=None, macd_signal=None, macd_hist=None),
-                                rsi_min=50, rsi_max=75)
+    r = sig.evaluate_daily_gate(_di(macd_line=None, macd_signal=None, macd_hist=None))
+    assert not r.degraded
+    assert r.passed
+
+
+def test_missing_daily_rsi_does_not_degrade_the_gate():
+    """Same reasoning as MACD - RSI decides nothing at Stage A now, so its
+    absence must not mark a ticker degraded either."""
+    r = sig.evaluate_daily_gate(_di(rsi_14=None))
     assert not r.degraded
     assert r.passed
 
 
 def test_daily_gate_sma_failure():
-    r = sig.evaluate_daily_gate(_di(close=90.0, trend_ma=100.0), rsi_min=50, rsi_max=75)
+    r = sig.evaluate_daily_gate(_di(close=90.0, trend_ma=100.0))
     assert not r.passed and any(c.name == "close_above_sma20" for c in r.failures())
 
 
 def test_daily_gate_blocks_earnings_inside_option_life():
     r = sig.evaluate_daily_gate(
-        _di(), rsi_min=50, rsi_max=75,
+        _di(),
         earnings_date=date(2026, 8, 31), option_expiry=date(2026, 9, 2),
         block_on_earnings_in_window=True,
     )
@@ -97,7 +101,7 @@ def test_daily_gate_blocks_earnings_inside_option_life():
 
 def test_daily_gate_allows_earnings_after_expiry():
     r = sig.evaluate_daily_gate(
-        _di(), rsi_min=50, rsi_max=75,
+        _di(),
         earnings_date=date(2026, 9, 30), option_expiry=date(2026, 9, 2),
         block_on_earnings_in_window=True,
     )
@@ -106,7 +110,7 @@ def test_daily_gate_allows_earnings_after_expiry():
 
 def test_daily_gate_earnings_toggle_off_does_not_block():
     r = sig.evaluate_daily_gate(
-        _di(), rsi_min=50, rsi_max=75,
+        _di(),
         earnings_date=date(2026, 8, 31), option_expiry=date(2026, 9, 2),
         block_on_earnings_in_window=False,
     )
@@ -115,12 +119,12 @@ def test_daily_gate_earnings_toggle_off_does_not_block():
 
 def test_daily_gate_missing_data_is_degraded_not_failed():
     """Degraded must be distinguishable from 'evaluated and did not qualify'."""
-    r = sig.evaluate_daily_gate(None, rsi_min=50, rsi_max=75)
+    r = sig.evaluate_daily_gate(None)
     assert r.degraded and not r.passed
     assert "no daily indicators" in r.degraded_reason
 
-    r2 = sig.evaluate_daily_gate(_di(rsi_14=None), rsi_min=50, rsi_max=75)
-    assert r2.degraded and "rsi_14" in r2.degraded_reason
+    r2 = sig.evaluate_daily_gate(_di(trend_ma=None))
+    assert r2.degraded and "trend_ma" in r2.degraded_reason
 
 
 # ── Stage B: setup gate ──────────────────────────────────────────────────────
@@ -147,6 +151,29 @@ def test_setup_gate_missing_price_is_degraded():
 
 # ── Stage C: trigger ─────────────────────────────────────────────────────────
 
+def _passing_rsi(day, start="09:30"):
+    """RSI(5m)/RSI(15m) series that read >60 by the time `day`'s bars begin -
+    a monotonically rising close (no down-ticks) makes Wilder RSI 100 once
+    warm (agent.daytrading.indicators.rsi's explicit zero-loss handling), so
+    this is a clean, deterministic "momentum condition passes" fixture for
+    tests whose actual focus is one of the other four conditions, not RSI
+    itself (see test_trigger_momentum_condition_* for RSI's own behavior).
+    Spans back well before `day` so the rolling 14-period warm-up (and the
+    15-minute resample's own warm-up on top of that) has already completed
+    by the first bar under test - a same-day-only series would still read
+    NaN at 09:45, same as it would in production before this fixture existed.
+    """
+    t0 = pd.Timestamp(f"{day} {start}", tz=ET) - timedelta(minutes=5 * 40)
+    n = 40 + 12  # 40 prior bars (warm-up) + enough to cover the test's own window
+    idx = pd.DatetimeIndex([t0 + timedelta(minutes=5 * i) for i in range(n)])
+    c = np.linspace(80.0, 120.0, n)  # strictly increasing -> RSI 100 once warm
+    bars = pd.DataFrame(
+        {"Open": c, "High": c + 0.05, "Low": c - 0.05, "Close": c, "Volume": np.full(n, 1000.0)},
+        index=idx,
+    )
+    return ind.rsi(bars["Close"], 14), ind.intraday_rsi(bars, resample="15min")
+
+
 def _trigger_setup(closes, volumes, *, or_high=100.0, or_avg_vol=1000.0, on_high=100.5):
     rth = _bars(DAY, closes, volumes, start="09:45")
     vwap = pd.Series(np.full(len(closes), 99.0), index=rth.index)
@@ -156,10 +183,12 @@ def _trigger_setup(closes, volumes, *, or_high=100.0, or_avg_vol=1000.0, on_high
     return rth, vwap, orr, on
 
 
-def test_trigger_fires_when_all_four_conditions_hold():
+def test_trigger_fires_when_all_five_conditions_hold():
     rth, vwap, orr, on = _trigger_setup([101.0], [5000.0])
+    rsi5, rsi15 = _passing_rsi(DAY)
     r = sig.evaluate_trigger("AAPL", rth, datetime(2026, 8, 28, 9, 55, tzinfo=ET),
-                             opening_range=orr, overnight=on, vwap=vwap, day=DAY)
+                             opening_range=orr, overnight=on, vwap=vwap, day=DAY,
+                             rsi_5m=rsi5, rsi_15m=rsi15)
     assert r.fired
     assert r.fire.bar_close == pytest.approx(101.0)
     assert r.fire.bar_time.strftime("%H:%M") == "09:45"
@@ -168,7 +197,7 @@ def test_trigger_fires_when_all_four_conditions_hold():
 
 @pytest.mark.parametrize("closes,volumes,failing", [
     ([99.5], [5000.0], "close_above_or_high"),       # below OR high
-    ([100.2], [5000.0], "close_above_overnight_high"),  # above OR, below overnight
+    ([100.2], [5000.0], "rsi_momentum_5m_or_15m"),   # above OR, but no RSI data supplied
     ([101.0], [500.0], "volume_above_or_avg"),        # volume too light
 ])
 def test_trigger_does_not_fire_and_names_the_failing_condition(closes, volumes, failing):
@@ -193,13 +222,16 @@ def test_trigger_requires_close_above_vwap():
 def test_mid_bar_evaluation_never_fires():
     """A bar labelled 09:45 covers 09:45-09:50 and must not decide before 09:50."""
     rth, vwap, orr, on = _trigger_setup([101.0], [5000.0])
+    rsi5, rsi15 = _passing_rsi(DAY)
 
     mid = sig.evaluate_trigger("AAPL", rth, datetime(2026, 8, 28, 9, 47, tzinfo=ET),
-                               opening_range=orr, overnight=on, vwap=vwap, day=DAY)
+                               opening_range=orr, overnight=on, vwap=vwap, day=DAY,
+                               rsi_5m=rsi5, rsi_15m=rsi15)
     assert not mid.fired and mid.bars_evaluated == 0
 
     at_close = sig.evaluate_trigger("AAPL", rth, datetime(2026, 8, 28, 9, 50, tzinfo=ET),
-                                    opening_range=orr, overnight=on, vwap=vwap, day=DAY)
+                                    opening_range=orr, overnight=on, vwap=vwap, day=DAY,
+                                    rsi_5m=rsi5, rsi_15m=rsi15)
     assert at_close.fired, "the same bar must fire once complete"
 
 
@@ -212,8 +244,10 @@ def test_completed_bars_boundary_is_inclusive_at_bar_end():
 
 def test_trigger_fires_at_most_once_per_ticker_per_day():
     rth, vwap, orr, on = _trigger_setup([101.0, 102.0, 103.0], [5000.0] * 3)
+    rsi5, rsi15 = _passing_rsi(DAY)
     first = sig.evaluate_trigger("AAPL", rth, datetime(2026, 8, 28, 10, 5, tzinfo=ET),
-                                 opening_range=orr, overnight=on, vwap=vwap, day=DAY)
+                                 opening_range=orr, overnight=on, vwap=vwap, day=DAY,
+                                 rsi_5m=rsi5, rsi_15m=rsi15)
     assert first.fired and first.fire.bar_time.strftime("%H:%M") == "09:45"
 
     # Re-evaluating later with the earlier fire passed back returns it frozen
@@ -257,14 +291,17 @@ def test_trigger_degrades_rather_than_silently_not_firing():
 
 
 def test_trigger_without_overnight_level_does_not_block():
-    """Missing overnight level is non-blocking but is labelled as such."""
+    """Overnight-high is no longer a trigger condition at all (it moved to an
+    informational-only field computed in views.py), so a missing overnight
+    level cannot block or even appear in the fired trigger's conditions."""
     rth, vwap, orr, _ = _trigger_setup([101.0], [5000.0])
     none_on = OvernightLevels(None, None, None, "no extended-hours bars", 0)
+    rsi5, rsi15 = _passing_rsi(DAY)
     r = sig.evaluate_trigger("AAPL", rth, datetime(2026, 8, 28, 9, 55, tzinfo=ET),
-                             opening_range=orr, overnight=none_on, vwap=vwap, day=DAY)
+                             opening_range=orr, overnight=none_on, vwap=vwap, day=DAY,
+                             rsi_5m=rsi5, rsi_15m=rsi15)
     assert r.fired
-    c = next(c for c in r.fire.conditions if c.name == "close_above_overnight_high")
-    assert c.passed and "not blocking" in c.expected
+    assert all(c.name != "close_above_overnight_high" for c in r.fire.conditions)
 
 
 def test_trigger_rejects_naive_now():
@@ -272,6 +309,91 @@ def test_trigger_rejects_naive_now():
     with pytest.raises(ValueError, match="timezone-aware"):
         sig.evaluate_trigger("AAPL", rth, datetime(2026, 8, 28, 9, 55),
                              opening_range=orr, overnight=on, vwap=vwap, day=DAY)
+
+
+# ── Stage C: intraday RSI momentum condition ─────────────────────────────────
+
+def _rsi_at(day, value_5m, value_15m, bar_label="09:45"):
+    """RSI(5m)/RSI(15m) series carrying exactly the given reading at the one
+    bar these tests evaluate — bypasses indicators.rsi's own math entirely
+    (that's covered separately) so this isolates evaluate_trigger's own
+    OR/threshold logic. The 15m series is left-labelled 15 minutes earlier
+    than `bar_label`, matching the bin that completes exactly at that bar
+    (e.g. the 09:30 bin covers [09:30, 09:45) and completes at 09:45)."""
+    ts = pd.Timestamp(f"{day} {bar_label}", tz=ET)
+    rsi5 = pd.Series([value_5m], index=[ts])
+    rsi15 = pd.Series([value_15m], index=[ts - timedelta(minutes=15)])
+    return rsi5, rsi15
+
+
+def test_signal_does_not_fire_without_rsi_data():
+    """No rsi_5m/rsi_15m supplied at all - the new condition must not pass
+    vacuously; a signal needs real momentum confirmation, not an assumption."""
+    rth, vwap, orr, on = _trigger_setup([101.0], [5000.0])
+    r = sig.evaluate_trigger("AAPL", rth, datetime(2026, 8, 28, 9, 55, tzinfo=ET),
+                             opening_range=orr, overnight=on, vwap=vwap, day=DAY)
+    assert not r.fired
+    assert "rsi_momentum_5m_or_15m" in {c.name for c in r.last_conditions if not c.passed}
+
+
+def test_signal_fires_on_rsi_5m_alone():
+    """RSI(15m) below threshold, RSI(5m) above - OR means either is enough."""
+    rth, vwap, orr, on = _trigger_setup([101.0], [5000.0])
+    rsi5, rsi15_low = _rsi_at(DAY, 75.0, 40.0)
+    r = sig.evaluate_trigger("AAPL", rth, datetime(2026, 8, 28, 9, 55, tzinfo=ET),
+                             opening_range=orr, overnight=on, vwap=vwap, day=DAY,
+                             rsi_5m=rsi5, rsi_15m=rsi15_low)
+    assert r.fired
+
+
+def test_signal_fires_on_rsi_15m_alone():
+    rth, vwap, orr, on = _trigger_setup([101.0], [5000.0])
+    rsi5_low, rsi15 = _rsi_at(DAY, 40.0, 75.0)
+    r = sig.evaluate_trigger("AAPL", rth, datetime(2026, 8, 28, 9, 55, tzinfo=ET),
+                             opening_range=orr, overnight=on, vwap=vwap, day=DAY,
+                             rsi_5m=rsi5_low, rsi_15m=rsi15)
+    assert r.fired
+
+
+def test_signal_does_not_fire_when_both_rsi_below_threshold():
+    rth, vwap, orr, on = _trigger_setup([101.0], [5000.0])
+    rsi5, rsi15 = _rsi_at(DAY, 55.0, 45.0)
+    r = sig.evaluate_trigger("AAPL", rth, datetime(2026, 8, 28, 9, 55, tzinfo=ET),
+                             opening_range=orr, overnight=on, vwap=vwap, day=DAY,
+                             rsi_5m=rsi5, rsi_15m=rsi15)
+    assert not r.fired
+    assert "rsi_momentum_5m_or_15m" in {c.name for c in r.last_conditions if not c.passed}
+
+
+def test_rsi_threshold_is_configurable():
+    """The default is 60, but the caller (DayTradingConfig.intraday_rsi_threshold)
+    can move it - a reading of 65 must pass a threshold of 60 but fail 70."""
+    rth, vwap, orr, on = _trigger_setup([101.0], [5000.0])
+    rsi5, rsi15 = _rsi_at(DAY, 65.0, 65.0)
+    lenient = sig.evaluate_trigger("AAPL", rth, datetime(2026, 8, 28, 9, 55, tzinfo=ET),
+                                   opening_range=orr, overnight=on, vwap=vwap, day=DAY,
+                                   rsi_5m=rsi5, rsi_15m=rsi15, rsi_threshold=60.0)
+    assert lenient.fired
+
+    strict = sig.evaluate_trigger("AAPL", rth, datetime(2026, 8, 28, 9, 55, tzinfo=ET),
+                                  opening_range=orr, overnight=on, vwap=vwap, day=DAY,
+                                  rsi_5m=rsi5, rsi_15m=rsi15, rsi_threshold=70.0)
+    assert not strict.fired
+
+
+def test_15m_rsi_reads_a_still_forming_bin_as_unavailable_not_stale():
+    """The first 15-minute bin (09:30-09:45) is not complete until 09:45 - at
+    09:45 itself (the first possible trigger bar), last_completed_value must
+    find it (labelled 09:30, completes exactly at 09:45), not read ahead into
+    a bin that hasn't finished accumulating."""
+    from agent.daytrading import indicators as ind_mod
+    t0 = pd.Timestamp(f"{DAY} 09:30", tz=ET)
+    idx = pd.DatetimeIndex([t0 + timedelta(minutes=5 * i) for i in range(3)])  # 09:30,09:35,09:40
+    series = pd.Series([70.0], index=[t0])  # one 15m bin, labelled 09:30
+    # Exactly at 09:45 the 09:30 bin (covering [09:30, 09:45)) has just completed.
+    assert ind_mod.last_completed_value(series, t0 + timedelta(minutes=15), timedelta(minutes=15)) == 70.0
+    # One minute earlier it has not.
+    assert ind_mod.last_completed_value(series, t0 + timedelta(minutes=14), timedelta(minutes=15)) is None
 
 
 # ── Golden-file test (spec §9): recorded session -> OR, VWAP, trigger bar ────
@@ -307,8 +429,10 @@ def test_golden_session_reproduces_or_vwap_and_trigger_bar():
     on = OvernightLevels(overnight_high=100.5, overnight_low=99.0,
                          premarket_last=100.1, covered_window="golden", bar_count=100)
 
+    rsi5, rsi15 = _passing_rsi(DAY)
     r = sig.evaluate_trigger("GOLD", bars, datetime(2026, 8, 28, 10, 30, tzinfo=ET),
-                             opening_range=orr, overnight=on, vwap=vwap, day=DAY)
+                             opening_range=orr, overnight=on, vwap=vwap, day=DAY,
+                             rsi_5m=rsi5, rsi_15m=rsi15)
 
     assert r.fired, "the 10:00 bar should trigger"
     assert r.fire.bar_time.strftime("%H:%M") == "10:00"
